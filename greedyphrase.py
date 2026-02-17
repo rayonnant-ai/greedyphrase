@@ -1,9 +1,110 @@
 import os
 import struct
 import collections
-import re
+import tempfile
 import subprocess
 from typing import List, Dict, Tuple
+
+
+def train_bpe(segments: List[bytes], num_merges: int) -> List[bytes]:
+    """
+    Train BPE on a list of byte segments and return merged tokens.
+    Each segment is a bytes object; segment boundaries are never crossed.
+    """
+    # Convert segments to lists of single-byte tokens, skip length-1
+    seqs = []
+    for seg in segments:
+        if len(seg) > 1:
+            seqs.append(list(seg))  # list of ints (0-255)
+
+    if not seqs:
+        return []
+
+    # Build initial pair counts and index of which seqs contain each pair
+    pair_counts = collections.Counter()
+    # pair_index[pair] = set of seq indices that contain this pair
+    pair_index = collections.defaultdict(set)
+
+    for si, seq in enumerate(seqs):
+        for i in range(len(seq) - 1):
+            pair = (seq[i], seq[i + 1])
+            pair_counts[pair] += 1
+            pair_index[pair].add(si)
+
+    merged_tokens = []
+
+    for _ in range(num_merges):
+        if not pair_counts:
+            break
+        # Find most frequent pair
+        best_pair = pair_counts.most_common(1)[0]
+        pair, count = best_pair
+        if count < 2:
+            break
+
+        # The new merged token as bytes
+        if isinstance(pair[0], int):
+            left = bytes([pair[0]])
+        else:
+            left = pair[0]
+        if isinstance(pair[1], int):
+            right = bytes([pair[1]])
+        else:
+            right = pair[1]
+        new_token = left + right
+        merged_tokens.append(new_token)
+
+        # Merge this pair in all sequences that contain it
+        affected = pair_index.pop(pair, set())
+        del pair_counts[pair]
+
+        for si in affected:
+            seq = seqs[si]
+            i = 0
+            while i < len(seq) - 1:
+                if seq[i] == pair[0] and seq[i + 1] == pair[1]:
+                    # Remove old pairs involving positions i-1,i and i+1,i+2
+                    if i > 0:
+                        old_left = (seq[i - 1], seq[i])
+                        pair_counts[old_left] -= 1
+                        if pair_counts[old_left] <= 0:
+                            del pair_counts[old_left]
+                        pair_index[old_left].discard(si)
+
+                    if i + 2 < len(seq):
+                        old_right = (seq[i + 1], seq[i + 2])
+                        pair_counts[old_right] -= 1
+                        if pair_counts[old_right] <= 0:
+                            del pair_counts[old_right]
+                        pair_index[old_right].discard(si)
+
+                    # Replace pair with new_token
+                    seq[i] = new_token
+                    del seq[i + 1]
+
+                    # Add new pairs
+                    if i > 0:
+                        new_left = (seq[i - 1], seq[i])
+                        pair_counts[new_left] += 1
+                        pair_index[new_left].add(si)
+                    if i + 1 < len(seq):
+                        new_right = (seq[i], seq[i + 1])
+                        pair_counts[new_right] += 1
+                        pair_index[new_right].add(si)
+                    # Don't advance i — check for consecutive merges
+                else:
+                    i += 1
+
+    # Convert merged tokens: they may be nested (bytes objects from merges)
+    # Flatten each to a plain bytes
+    result = []
+    for t in merged_tokens:
+        if isinstance(t, bytes):
+            result.append(t)
+        else:
+            # Should not happen, but just in case
+            result.append(bytes([t]) if isinstance(t, int) else t)
+    return result
 
 class GreedyPhraseTokenizer:
     """
@@ -26,17 +127,39 @@ class GreedyPhraseTokenizer:
         if os.path.exists(model_path):
             self.load(model_path)
             
-    def train(self, file_paths: List[str], phrase_ratio=0.5):
+    @staticmethod
+    def _save_vocab(vocab: List[bytes], path: str):
+        """Save a vocab list to the length-prefixed binary format."""
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'wb') as f:
+            f.write(struct.pack('>I', len(vocab)))
+            for token in vocab:
+                f.write(struct.pack('>I', len(token)))
+                f.write(token)
+
+    def _ensure_fast_encoder(self):
+        """Compile fast_encoder if needed and return its path."""
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        encoder_bin = os.path.join(base_dir, "fast_encoder")
+        if not os.path.exists(encoder_bin):
+            print("Compiling fast_encoder...", flush=True)
+            subprocess.run(
+                ["gcc", "-O3", "-o", encoder_bin, os.path.join(base_dir, "fast_encoder.c")],
+                check=True
+            )
+        return encoder_bin
+
+    def train(self, file_paths: List[str], phrase_ratio=0.95):
         """
         Trains the tokenizer vocabulary from a list of files.
-        Uses C-based fast_counter for speed.
+        Uses C-based fast_counter for phrase extraction, then BPE on residuals.
         """
         print(f"Training tokenizer on {len(file_paths)} files using fast_counter...", flush=True)
-        
+
         # Determine path to fast_counter binary
         base_dir = os.path.dirname(os.path.abspath(__file__))
         counter_bin = os.path.join(base_dir, "fast_counter")
-        
+
         if not os.path.exists(counter_bin):
             print("Compiling fast_counter...", flush=True)
             try:
@@ -48,19 +171,12 @@ class GreedyPhraseTokenizer:
                 print(f"Failed to compile fast_counter: {e}", flush=True)
                 return
 
-        # Run fast_counter on each file
-        # For simplicity, we concatenate files or run sequentially.
-        # Since fast_counter takes one file argument, let's run it on the first file (assuming one large file like tiny_stories)
-        # Or loop if multiple.
-        
         counts_file = os.path.join(base_dir, "tokenizer", "counts.txt")
         if os.path.exists(counts_file):
             os.remove(counts_file)
-            
-        # Run on the first file (assuming single training file for now)
-        # If multiple, we'd need to merge counts. Let's support just the first file for the demo.
+
         target_file = file_paths[0]
-        
+
         print(f"Running fast_counter on {target_file}...", flush=True)
         try:
             subprocess.run([counter_bin, target_file], check=True)
@@ -70,12 +186,12 @@ class GreedyPhraseTokenizer:
 
         # Read back the counts
         print("Loading counts from C backend...", flush=True)
-        
+
         atom_freqs = collections.Counter()
         phrase_freqs = collections.Counter()
-        
+
         current_section = None
-        
+
         with open(counts_file, 'r', encoding='latin-1') as f:
             for line in f:
                 line = line.strip()
@@ -88,68 +204,128 @@ class GreedyPhraseTokenizer:
                 elif line == "TRIGRAMS":
                     current_section = "phrases"
                     continue
-                    
+
                 parts = line.split(' ')
                 if len(parts) < 2: continue
-                
+
                 try:
                     count = int(parts[0])
-                    # Token is the rest of the line, unescaped
                     raw_token = " ".join(parts[1:])
                     token = raw_token.replace('\\\\', '\\').replace('\\n', '\n').replace('\\r', '\r')
-                    
+
                     if current_section == "atoms":
                         atom_freqs[token] += count
                     elif current_section == "phrases":
                         phrase_freqs[token] += count
                 except ValueError:
-                    continue # Skip malformed lines if any
-        
+                    continue
+
         print(f"Loaded {len(atom_freqs)} atoms and {len(phrase_freqs)} phrases.", flush=True)
 
-        # 2. Vocabulary Selection
-        print("Selecting best tokens for vocabulary...", flush=True)
-        num_phrases = int(self.vocab_size * phrase_ratio)
-        # Reserve space for 256 bytes + special tokens
-        reserved_tokens = ["<pad>", "<unk>", "<s>", "</s>"]
+        # ── Step A: Select phrases ──
+        print("Selecting phrases for vocabulary...", flush=True)
+        reserved_tokens = [b"<pad>", b"<unk>", b"<s>", b"</s>"]
         reserved_bytes = [bytes([i]) for i in range(256)]
-        
-        # Calculate remaining slots
-        total_reserved = len(reserved_tokens) + len(reserved_bytes)
-        remaining_slots = self.vocab_size - total_reserved
-        
-        # Split remaining slots between common atoms (words) and phrases
-        # We'll give priority to phrases as requested, but we need atoms for coverage
-        # Let's stick to the ratio for the *variable* part
-        limit_phrases = int(remaining_slots * phrase_ratio)
-        limit_atoms = remaining_slots - limit_phrases
-        
-        self.vocab = [t.encode('utf-8') for t in reserved_tokens] + reserved_bytes
-        
-        # Fill Atoms (Single words/punctuation)
-        common_atoms = atom_freqs.most_common(limit_atoms)
-        for atom, freq in common_atoms:
-            # Avoid duplicates if atom is already a single byte
-            b_atom = atom.encode('latin-1')
-            if len(b_atom) > 1:
-                self.vocab.append(b_atom)
-            else:
-                # Give the slot back to phrases if we skip an atom
-                limit_phrases += 1
-            
-        # Fill Phrases (Multi-word strings)
-        common_phrases = phrase_freqs.most_common(limit_phrases)
-        for phrase, freq in common_phrases:
-            self.vocab.append(phrase.encode('latin-1'))
-            
-        # Rebuild mappings
+        total_reserved = len(reserved_tokens) + len(reserved_bytes)  # 260
+        remaining_slots = self.vocab_size - total_reserved  # 65276
+
+        num_phrase_slots = int(remaining_slots * phrase_ratio)
+        num_bpe_slots = remaining_slots - num_phrase_slots
+
+        # Merge atom + phrase counts together — phrases (bigrams/trigrams) that are
+        # multi-byte get priority; single-byte atoms are already covered by reserved_bytes
+        all_phrase_freqs = collections.Counter()
+        for atom, freq in atom_freqs.items():
+            b = atom.encode('latin-1')
+            if len(b) > 1:
+                all_phrase_freqs[b] = freq
+        for phrase, freq in phrase_freqs.items():
+            b = phrase.encode('latin-1')
+            all_phrase_freqs[b] += freq
+
+        # Pick top phrases by frequency
+        top_phrases = all_phrase_freqs.most_common(num_phrase_slots)
+        phrase_entries = [b for b, _ in top_phrases]
+
+        print(f"  Selected {len(phrase_entries)} phrases.", flush=True)
+
+        # ── Step B: First-pass encode to collect residuals ──
+        print("First-pass encode to collect residuals...", flush=True)
+        partial_vocab = reserved_tokens + reserved_bytes + phrase_entries
+
+        # Save partial vocab to temp file
+        tmp_vocab_fd, tmp_vocab_path = tempfile.mkstemp(suffix='.vocab')
+        os.close(tmp_vocab_fd)
+        tmp_tokens_fd, tmp_tokens_path = tempfile.mkstemp(suffix='.tokens')
+        os.close(tmp_tokens_fd)
+
+        try:
+            self._save_vocab(partial_vocab, tmp_vocab_path)
+
+            # Run fast_encoder with partial vocab
+            encoder_bin = self._ensure_fast_encoder()
+            print(f"  Running fast_encoder (partial vocab, {len(partial_vocab)} tokens)...", flush=True)
+            subprocess.run(
+                [encoder_bin, tmp_vocab_path, target_file, tmp_tokens_path],
+                check=True
+            )
+
+            # Read token stream and extract byte-fallback runs
+            token_data = open(tmp_tokens_path, 'rb').read()
+            num_tokens = len(token_data) // 2
+            print(f"  First-pass produced {num_tokens:,} tokens.", flush=True)
+
+            residuals = []
+            current_run = bytearray()
+
+            for offset in range(0, len(token_data), 2):
+                tid = int.from_bytes(token_data[offset:offset+2], 'little')
+                if 4 <= tid <= 259:
+                    # Byte fallback token — accumulate
+                    current_run.append(tid - 4)
+                else:
+                    if len(current_run) > 1:
+                        residuals.append(bytes(current_run))
+                    current_run = bytearray()
+
+            # Don't forget trailing run
+            if len(current_run) > 1:
+                residuals.append(bytes(current_run))
+
+            print(f"  Collected {len(residuals):,} residual segments "
+                  f"({sum(len(r) for r in residuals):,} bytes total).", flush=True)
+
+        finally:
+            os.unlink(tmp_vocab_path)
+            os.unlink(tmp_tokens_path)
+
+        # ── Step C: Train BPE on residuals ──
+        print(f"Training BPE on residuals ({num_bpe_slots} merges)...", flush=True)
+        bpe_tokens = train_bpe(residuals, num_bpe_slots)
+
+        # Filter out duplicates and tokens too long for the C encoder (MAX_TOKEN_LEN=1024)
+        existing = set(reserved_tokens + reserved_bytes + phrase_entries)
+        bpe_tokens = [t for t in bpe_tokens if t not in existing and len(t) < 1024]
+        print(f"  Got {len(bpe_tokens)} unique BPE tokens.", flush=True)
+
+        # ── Build final vocab ──
+        self.vocab = reserved_tokens + reserved_bytes + phrase_entries + bpe_tokens
+
+        # Pad or truncate to vocab_size
+        if len(self.vocab) < self.vocab_size:
+            # Pad with empty placeholder bytes (unused slots)
+            pass  # It's fine to have fewer; encoder just won't use those IDs
+        elif len(self.vocab) > self.vocab_size:
+            self.vocab = self.vocab[:self.vocab_size]
+
         self.token_to_id = {token: i for i, token in enumerate(self.vocab)}
         self._build_trie()
-        
+
         print(f"Vocab size: {len(self.vocab)}", flush=True)
-        print(f"  - Bytes: 256", flush=True)
-        print(f"  - Atoms: {len(common_atoms)}", flush=True)
-        print(f"  - Phrases: {len(common_phrases)}", flush=True)
+        print(f"  - Special: {len(reserved_tokens)}", flush=True)
+        print(f"  - Bytes: {len(reserved_bytes)}", flush=True)
+        print(f"  - Phrases: {len(phrase_entries)}", flush=True)
+        print(f"  - BPE: {len(bpe_tokens)}", flush=True)
         self.save(self.model_path)
 
     def _build_trie(self):
@@ -290,6 +466,6 @@ if __name__ == "__main__":
     # Verify "guest appearance" is one token
     ga_id = t.token_to_id.get(b"guest appearance")
     if ga_id and ga_id in tokens:
-        print("✅ 'guest appearance' is a single token!")
+        print("[PASS] 'guest appearance' is a single token!")
     else:
-        print("❌ 'guest appearance' was split.")
+        print("[FAIL] 'guest appearance' was split.")
