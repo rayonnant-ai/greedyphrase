@@ -1,0 +1,5 @@
+__pycache__/
+data/
+tokenizer/
+fast_counter
+fast_encoder
