@@ -1,70 +1,256 @@
+#define XXH_INLINE_ALL
+#include "xxhash.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
+#include <stdint.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <time.h>
+#include <pthread.h>
 
 #define MAX_TOKEN_LEN 256
-#define HASH_SIZE 1000003 // Prime for hash table
 
+/* Chained hash table with arena-allocated nodes.
+ * Per-thread tables: 2^22 (4M buckets, 32MB each).
+ * Global merge tables: 2^27 (128M buckets, 1GB each).
+ */
+#define THREAD_BITS 22
+#define THREAD_SIZE (1U << THREAD_BITS)
+#define THREAD_MASK (THREAD_SIZE - 1)
+
+#define GLOBAL_BITS 27
+#define GLOBAL_SIZE (1U << GLOBAL_BITS)
+#define GLOBAL_MASK (GLOBAL_SIZE - 1)
+
+/* Arena — per-thread */
+#define ARENA_BLOCK (128 * 1024 * 1024)
+
+typedef struct Arena { char *base; size_t used, cap; struct Arena *prev; } Arena;
+
+static Arena *arena_new(void) {
+    Arena *a = malloc(sizeof(Arena));
+    a->base = malloc(ARENA_BLOCK);
+    a->used = 0;
+    a->cap = ARENA_BLOCK;
+    a->prev = NULL;
+    return a;
+}
+
+static inline void *arena_alloc(Arena **ap, size_t size) {
+    size = (size + 7) & ~(size_t)7;
+    Arena *a = *ap;
+    if (__builtin_expect(a->used + size > a->cap, 0)) {
+        Arena *n = malloc(sizeof(Arena));
+        n->base = malloc(ARENA_BLOCK);
+        n->used = 0;
+        n->cap = ARENA_BLOCK;
+        n->prev = a;
+        *ap = n;
+        a = n;
+    }
+    void *p = a->base + a->used;
+    a->used += size;
+    return p;
+}
+
+static void arena_free_all(Arena *a) {
+    while (a) {
+        Arena *prev = a->prev;
+        free(a->base);
+        free(a);
+        a = prev;
+    }
+}
+
+/* Node: hash + key inline via flexible array */
 typedef struct Node {
-    char *key;
-    int count;
     struct Node *next;
+    uint32_t hash32;  /* upper 32 bits for fast reject */
+    uint32_t count;
+    uint16_t key_len;
+    char key[];
 } Node;
 
-Node *atom_table[HASH_SIZE];
-Node *bigram_table[HASH_SIZE];
-Node *trigram_table[HASH_SIZE];
+/* --- Hash table ops --- */
 
-unsigned long hash(char *str) {
-    unsigned long hash = 5381;
-    int c;
-    while ((c = *str++))
-        hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
-    return hash % HASH_SIZE;
-}
-
-void add_count(Node **table, char *key) {
-    unsigned long h = hash(key);
-    Node *node = table[h];
-    while (node) {
-        if (strcmp(node->key, key) == 0) {
-            node->count++;
+static inline void ht_add(Node **buckets, uint32_t mask, Arena **ap,
+                           const char *key, int len, uint64_t hash) {
+    uint32_t idx = (uint32_t)hash & mask;
+    uint32_t tag = (uint32_t)(hash >> 32);
+    Node *n = buckets[idx];
+    while (n) {
+        if (n->hash32 == tag && n->key_len == (uint16_t)len &&
+            memcmp(n->key, key, len) == 0) {
+            n->count++;
             return;
         }
-        node = node->next;
+        n = n->next;
     }
-    // New node
-    Node *new_node = (Node *)malloc(sizeof(Node));
-    new_node->key = strdup(key);
-    new_node->count = 1;
-    new_node->next = table[h];
-    table[h] = new_node;
+    Node *node = arena_alloc(ap, sizeof(Node) + len);
+    node->hash32 = tag;
+    node->count = 1;
+    node->key_len = (uint16_t)len;
+    memcpy(node->key, key, len);
+    node->next = buckets[idx];
+    buckets[idx] = node;
 }
 
-void dump_table(Node **table, FILE *out, int min_freq) {
-    for (int i = 0; i < HASH_SIZE; i++) {
-        Node *node = table[i];
-        while (node) {
-            if (node->count >= min_freq) {
-                fprintf(out, "%d ", node->count);
-                for (char *p = node->key; *p; p++) {
-                    if (*p == '\n') fprintf(out, "\\n");
-                    else if (*p == '\r') fprintf(out, "\\r");
-                    else if (*p == '\\') fprintf(out, "\\\\");
-                    else fputc(*p, out);
+static inline void ht_merge_node(Node **buckets, uint32_t mask, Arena **ap,
+                                  const char *key, int len, uint32_t tag, uint32_t count) {
+    uint32_t idx = (uint32_t)((uint64_t)tag << 32 | XXH3_64bits(key, len)) & mask;
+    /* Recompute idx from full hash for global table distribution */
+    uint64_t h = XXH3_64bits(key, len);
+    idx = (uint32_t)h & mask;
+    uint32_t gtag = (uint32_t)(h >> 32);
+
+    Node *n = buckets[idx];
+    while (n) {
+        if (n->hash32 == gtag && n->key_len == (uint16_t)len &&
+            memcmp(n->key, key, len) == 0) {
+            n->count += count;
+            return;
+        }
+        n = n->next;
+    }
+    Node *node = arena_alloc(ap, sizeof(Node) + len);
+    node->hash32 = gtag;
+    node->count = count;
+    node->key_len = (uint16_t)len;
+    memcpy(node->key, key, len);
+    node->next = buckets[idx];
+    buckets[idx] = node;
+}
+
+/* Pre-computed character type */
+static uint8_t char_type[256];
+
+static void init_char_type(void) {
+    for (int i = 0; i < 256; i++) {
+        unsigned char c = (unsigned char)i;
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '_')
+            char_type[i] = 1;
+        else if (c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
+                 c == '\f' || c == '\v')
+            char_type[i] = 2;
+        else
+            char_type[i] = 3;
+    }
+}
+
+/* --- Per-thread context --- */
+
+typedef struct {
+    Node **atoms, **bigrams, **trigrams;
+    Arena *arena;
+    const unsigned char *data;
+    size_t start, end, file_size;
+    long long token_count;
+} ThreadCtx;
+
+static void *count_thread(void *arg) {
+    ThreadCtx *ctx = (ThreadCtx *)arg;
+    const unsigned char *data = ctx->data;
+    size_t pos = ctx->start;
+    size_t end = ctx->end;
+
+    /* Align start to token boundary */
+    if (pos > 0) {
+        uint8_t prev_type = char_type[data[pos - 1]];
+        while (pos < end && char_type[data[pos]] == prev_type)
+            pos++;
+    }
+
+    /* Extend end to complete last token */
+    size_t real_end = end;
+    if (end < ctx->file_size) {
+        uint8_t end_type = char_type[data[end - 1]];
+        while (real_end < ctx->file_size && char_type[data[real_end]] == end_type)
+            real_end++;
+    }
+
+    uint64_t w1_hash = 0, w2_hash = 0;
+    int w1_len = 0, w2_len = 0;
+    const char *w1_ptr = NULL, *w2_ptr = NULL;
+    char ngram_buf[MAX_TOKEN_LEN * 3];
+    long long tokens = 0;
+
+    while (pos < real_end) {
+        uint8_t type = char_type[data[pos]];
+        size_t tok_start = pos;
+        pos++;
+        while (pos < real_end && char_type[data[pos]] == type)
+            pos++;
+
+        int tok_len = (int)(pos - tok_start);
+        if (tok_len >= MAX_TOKEN_LEN) tok_len = MAX_TOKEN_LEN - 1;
+        const char *tok = (const char *)data + tok_start;
+
+        uint64_t tok_hash = XXH3_64bits(tok, tok_len);
+
+        ht_add(ctx->atoms, THREAD_MASK, &ctx->arena, tok, tok_len, tok_hash);
+        tokens++;
+
+        if (w2_len > 0) {
+            memcpy(ngram_buf, w2_ptr, w2_len);
+            memcpy(ngram_buf + w2_len, tok, tok_len);
+            int bi_len = w2_len + tok_len;
+            uint64_t bi_hash = XXH3_64bits(ngram_buf, bi_len);
+            ht_add(ctx->bigrams, THREAD_MASK, &ctx->arena, ngram_buf, bi_len, bi_hash);
+
+            if (w1_len > 0) {
+                memcpy(ngram_buf, w1_ptr, w1_len);
+                memcpy(ngram_buf + w1_len, w2_ptr, w2_len);
+                memcpy(ngram_buf + w1_len + w2_len, tok, tok_len);
+                int tri_len = w1_len + w2_len + tok_len;
+                uint64_t tri_hash = XXH3_64bits(ngram_buf, tri_len);
+                ht_add(ctx->trigrams, THREAD_MASK, &ctx->arena, ngram_buf, tri_len, tri_hash);
+            }
+        }
+
+        w1_ptr = w2_ptr; w1_len = w2_len; w1_hash = w2_hash;
+        w2_ptr = tok;     w2_len = tok_len; w2_hash = tok_hash;
+    }
+
+    ctx->token_count = tokens;
+    return NULL;
+}
+
+/* --- Merge + dump --- */
+
+static void merge_table(Node **dst, uint32_t dst_mask, Arena **ap,
+                         Node **src, uint32_t src_size) {
+    for (uint32_t i = 0; i < src_size; i++) {
+        Node *n = src[i];
+        while (n) {
+            ht_merge_node(dst, dst_mask, ap, n->key, n->key_len, n->hash32, n->count);
+            n = n->next;
+        }
+    }
+}
+
+static void dump_table(Node **buckets, uint32_t size, FILE *out, int min_freq) {
+    for (uint32_t i = 0; i < size; i++) {
+        Node *n = buckets[i];
+        while (n) {
+            if ((int)n->count >= min_freq) {
+                fprintf(out, "%u ", n->count);
+                for (int j = 0; j < n->key_len; j++) {
+                    char c = n->key[j];
+                    if (c == '\n') fputs("\\n", out);
+                    else if (c == '\r') fputs("\\r", out);
+                    else if (c == '\\') fputs("\\\\", out);
+                    else fputc(c, out);
                 }
                 fputc('\n', out);
             }
-            node = node->next;
+            n = n->next;
         }
     }
-}
-
-int get_type(char c) {
-    if (isalnum(c) || c == '_') return 1; // Word
-    if (isspace(c)) return 2; // Space
-    return 3; // Punctuation
 }
 
 int main(int argc, char *argv[]) {
@@ -73,95 +259,110 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    FILE *f = fopen(argv[1], "r");
-    if (!f) {
-        perror("Error opening file");
-        return 1;
+    init_char_type();
+
+    int nthreads = (int)sysconf(_SC_NPROCESSORS_ONLN);
+    if (nthreads < 1) nthreads = 1;
+    if (nthreads > 32) nthreads = 32;
+
+    /* mmap input */
+    int fd = open(argv[1], O_RDONLY);
+    if (fd < 0) { perror("Error opening file"); return 1; }
+    struct stat st;
+    fstat(fd, &st);
+    size_t file_size = (size_t)st.st_size;
+    const unsigned char *data = mmap(NULL, file_size, PROT_READ,
+                                     MAP_PRIVATE | MAP_POPULATE, fd, 0);
+    if (data == MAP_FAILED) { perror("mmap"); return 1; }
+    madvise((void *)data, file_size, MADV_SEQUENTIAL);
+    close(fd);
+
+    printf("Processing %s (%zu bytes) with %d threads\n", argv[1], file_size, nthreads);
+    printf("Per-thread: 3 x %u buckets (%zu MB each)\n",
+           THREAD_SIZE, (size_t)THREAD_SIZE * 8 >> 20);
+
+    /* Allocate per-thread state */
+    ThreadCtx *ctxs = calloc(nthreads, sizeof(ThreadCtx));
+    size_t chunk = file_size / nthreads;
+
+    for (int i = 0; i < nthreads; i++) {
+        ctxs[i].atoms   = calloc(THREAD_SIZE, sizeof(Node *));
+        ctxs[i].bigrams = calloc(THREAD_SIZE, sizeof(Node *));
+        ctxs[i].trigrams= calloc(THREAD_SIZE, sizeof(Node *));
+        ctxs[i].arena   = arena_new();
+        ctxs[i].data    = data;
+        ctxs[i].file_size = file_size;
+        ctxs[i].start   = i * chunk;
+        ctxs[i].end     = (i == nthreads - 1) ? file_size : (i + 1) * chunk;
     }
 
-    printf("Processing %s...\n", argv[1]);
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
 
-    char buf[1024*1024]; // 1MB buffer
-    char current_token[MAX_TOKEN_LEN] = {0};
-    int current_len = 0;
-    int current_type = 0;
-    
-    // Window for n-grams
-    char w1[MAX_TOKEN_LEN] = {0}; // t-2
-    char w2[MAX_TOKEN_LEN] = {0}; // t-1
-    // current_token is t
-    
-    size_t n;
+    pthread_t *threads = malloc(nthreads * sizeof(pthread_t));
+    for (int i = 0; i < nthreads; i++)
+        pthread_create(&threads[i], NULL, count_thread, &ctxs[i]);
+    for (int i = 0; i < nthreads; i++)
+        pthread_join(threads[i], NULL);
+
+    struct timespec t1;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double count_s = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
+
     long long total_tokens = 0;
+    for (int i = 0; i < nthreads; i++)
+        total_tokens += ctxs[i].token_count;
+    printf("Count: %lld tokens | %.2fs | %.1f MB/s\n",
+           total_tokens, count_s, (double)file_size / (1024.0 * 1024.0) / count_s);
 
-    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
-        for (size_t i = 0; i < n; i++) {
-            char c = buf[i];
-            int type = get_type(c);
+    /* Merge into global tables (2^27 = 128M buckets) */
+    printf("Merging into global tables (%u buckets, %zu MB each)...\n",
+           GLOBAL_SIZE, (size_t)GLOBAL_SIZE * 8 >> 20);
 
-            if (current_len > 0 && type != current_type) {
-                // Token boundary
-                current_token[current_len] = '\0';
-                
-                // 1. Add Atom
-                add_count(atom_table, current_token);
-                total_tokens++;
+    Node **g_atoms   = calloc(GLOBAL_SIZE, sizeof(Node *));
+    Node **g_bigrams = calloc(GLOBAL_SIZE, sizeof(Node *));
+    Node **g_trigrams= calloc(GLOBAL_SIZE, sizeof(Node *));
+    Arena *g_arena   = arena_new();
 
-                // 2. Add Bigram (w2 + current)
-                if (w2[0] != 0) {
-                    char bigram[MAX_TOKEN_LEN*2];
-                    snprintf(bigram, sizeof(bigram), "%s%s", w2, current_token);
-                    add_count(bigram_table, bigram);
-                }
-
-                // 3. Add Trigram (w1 + w2 + current)
-                if (w1[0] != 0 && w2[0] != 0) {
-                    char trigram[MAX_TOKEN_LEN*3];
-                    snprintf(trigram, sizeof(trigram), "%s%s%s", w1, w2, current_token);
-                    add_count(trigram_table, trigram);
-                }
-
-                // Shift window
-                strcpy(w1, w2);
-                strcpy(w2, current_token);
-                
-                // Reset for next token
-                current_len = 0;
-                if (total_tokens % 1000000 == 0) {
-                    printf("Processed %lld M tokens...\r", total_tokens / 1000000);
-                    fflush(stdout);
-                }
-            }
-
-            if (current_len == 0) current_type = type;
-            
-            if (current_len < MAX_TOKEN_LEN - 1) {
-                current_token[current_len++] = c;
-            }
-        }
-    }
-    
-    // Process last token
-    if (current_len > 0) {
-        current_token[current_len] = '\0';
-        add_count(atom_table, current_token);
+    for (int i = 0; i < nthreads; i++) {
+        merge_table(g_atoms,    GLOBAL_MASK, &g_arena, ctxs[i].atoms,   THREAD_SIZE);
+        merge_table(g_bigrams,  GLOBAL_MASK, &g_arena, ctxs[i].bigrams, THREAD_SIZE);
+        merge_table(g_trigrams, GLOBAL_MASK, &g_arena, ctxs[i].trigrams, THREAD_SIZE);
+        free(ctxs[i].atoms); free(ctxs[i].bigrams); free(ctxs[i].trigrams);
+        arena_free_all(ctxs[i].arena);
     }
 
-    printf("\nFinished reading. Writing to tokenizer/counts.txt...\n");
+    struct timespec t2;
+    clock_gettime(CLOCK_MONOTONIC, &t2);
+    double merge_s = (t2.tv_sec - t1.tv_sec) + (t2.tv_nsec - t1.tv_nsec) / 1e9;
+    printf("Merge: %.2fs\n", merge_s);
+
+    printf("Writing tokenizer/counts.txt...\n");
     FILE *out = fopen("tokenizer/counts.txt", "w");
-    
+    if (!out) { perror("fopen"); return 1; }
+    char *wb = malloc(16 * 1024 * 1024);
+    setvbuf(out, wb, _IOFBF, 16 * 1024 * 1024);
+
     fprintf(out, "ATOMS\n");
-    dump_table(atom_table, out, 1);
-    
+    dump_table(g_atoms, GLOBAL_SIZE, out, 1);
     fprintf(out, "BIGRAMS\n");
-    dump_table(bigram_table, out, 50); // Filter infrequent phrases
-    
+    dump_table(g_bigrams, GLOBAL_SIZE, out, 50);
     fprintf(out, "TRIGRAMS\n");
-    dump_table(trigram_table, out, 50);
-    
+    dump_table(g_trigrams, GLOBAL_SIZE, out, 50);
     fclose(out);
-    fclose(f);
-    
+
+    struct timespec t3;
+    clock_gettime(CLOCK_MONOTONIC, &t3);
+    double total_s = (t3.tv_sec - t0.tv_sec) + (t3.tv_nsec - t0.tv_nsec) / 1e9;
+    printf("Total: %.2fs (count %.2f + merge %.2f + write %.2f) | %.1f MB/s\n",
+           total_s, count_s, merge_s,
+           (t3.tv_sec - t2.tv_sec) + (t3.tv_nsec - t2.tv_nsec) / 1e9,
+           (double)file_size / (1024.0 * 1024.0) / total_s);
+
+    munmap((void *)data, file_size);
+    free(g_atoms); free(g_bigrams); free(g_trigrams);
+    arena_free_all(g_arena);
+    free(wb); free(ctxs); free(threads);
     printf("Done.\n");
     return 0;
 }

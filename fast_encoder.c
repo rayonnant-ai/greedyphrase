@@ -2,69 +2,78 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <time.h>
+#include <immintrin.h>
 
-#define MAX_VOCAB_SIZE 70000 
-#define BUFFER_SIZE 1024 * 1024 
 #define MAX_TOKEN_LEN 1024
+#define OUTPUT_BUF_TOKENS (512 * 1024)  /* 512K tokens = 1MB buffer */
+#define INITIAL_POOL_CAP (1 << 20)      /* 1M nodes initial capacity */
 
-typedef struct TrieNode {
-    struct TrieNode *children[256];
-    int token_id; // -1 if not a token end
+/* --- Trie with contiguous node pool --- */
+
+typedef struct {
+    int32_t children[256];  /* index into pool, -1 = no child */
+    int32_t token_id;       /* -1 if not a token end */
 } TrieNode;
 
-TrieNode *root;
-char vocab[MAX_VOCAB_SIZE][256]; // Simple fixed size tokens
-int vocab_size = 0;
+static TrieNode *pool;
+static int32_t pool_size;
+static int32_t pool_cap;
 
-TrieNode *create_node() {
-    TrieNode *node = (TrieNode *)malloc(sizeof(TrieNode));
-    if (node) {
-        node->token_id = -1;
-        for (int i = 0; i < 256; i++) node->children[i] = NULL;
+static int32_t alloc_node(void) {
+    if (pool_size >= pool_cap) {
+        pool_cap *= 2;
+        pool = realloc(pool, (size_t)pool_cap * sizeof(TrieNode));
+        if (!pool) { fprintf(stderr, "Out of memory\n"); exit(1); }
     }
-    return node;
+    int32_t idx = pool_size++;
+    memset(pool[idx].children, 0xFF, sizeof(pool[idx].children)); /* -1 in two's complement */
+    pool[idx].token_id = -1;
+    return idx;
 }
 
-void insert(const char *key, int len, int id) {
-    TrieNode *node = root;
+static void insert(const char *key, int len, int id) {
+    int32_t node = 0; /* root is always index 0 */
     for (int i = 0; i < len; i++) {
-        unsigned char index = (unsigned char)key[i];
-        if (!node->children[index]) {
-            node->children[index] = create_node();
+        unsigned char c = (unsigned char)key[i];
+        if (pool[node].children[c] == -1) {
+            pool[node].children[c] = alloc_node();
         }
-        node = node->children[index];
+        node = pool[node].children[c];
     }
-    node->token_id = id;
+    pool[node].token_id = id;
 }
 
-// Load vocab from file (length-prefixed format or newline separated?)
-// Python greedyphrase.py uses struct.pack('>I', len) + bytes
-// Let's implement reading that binary format.
-// >I (4 bytes big endian) = count
-// >I (4 bytes big endian) = len, then bytes...
+/* --- Vocab loading --- */
 
-uint32_t read_uint32_be(FILE *f) {
+static uint32_t read_uint32_be(FILE *f) {
     unsigned char buf[4];
     if (fread(buf, 1, 4, f) != 4) return 0;
-    return (buf[0] << 24) | (buf[1] << 16) | (buf[2] << 8) | buf[3];
+    return ((uint32_t)buf[0] << 24) | ((uint32_t)buf[1] << 16) |
+           ((uint32_t)buf[2] << 8)  |  (uint32_t)buf[3];
 }
 
-void load_vocab(const char *path) {
+static int load_vocab(const char *path) {
     FILE *f = fopen(path, "rb");
-    if (!f) {
-        perror("Error opening vocab file");
-        exit(1);
-    }
+    if (!f) { perror("Error opening vocab file"); exit(1); }
 
     uint32_t count = read_uint32_be(f);
     printf("Loading %u tokens from vocab...\n", count);
-    
-    root = create_node();
-    vocab_size = count;
 
+    /* Init pool and allocate root */
+    pool_cap = INITIAL_POOL_CAP;
+    pool_size = 0;
+    pool = malloc((size_t)pool_cap * sizeof(TrieNode));
+    if (!pool) { fprintf(stderr, "Out of memory\n"); exit(1); }
+    alloc_node(); /* root = index 0 */
+
+    char token[MAX_TOKEN_LEN];
     for (uint32_t i = 0; i < count; i++) {
         uint32_t len = read_uint32_be(f);
-        char token[MAX_TOKEN_LEN]; // Assuming max token len fits in buffer
         if (len >= MAX_TOKEN_LEN) {
             fprintf(stderr, "Token too long: %u\n", len);
             exit(1);
@@ -73,33 +82,15 @@ void load_vocab(const char *path) {
             fprintf(stderr, "Error reading token %u\n", i);
             exit(1);
         }
-        token[len] = '\0'; // Null terminate for debug, but use len for insert
-        insert(token, len, i);
+        insert(token, (int)len, (int)i);
     }
     fclose(f);
+    printf("Trie built: %d nodes (%.1f MB)\n", pool_size,
+           (double)pool_size * sizeof(TrieNode) / (1024.0 * 1024.0));
+    return (int)count;
 }
 
-// Greedy match function
-int match_longest(const unsigned char *buffer, int len, int *match_len) {
-    TrieNode *node = root;
-    int longest_id = -1;
-    int longest_len = 0;
-    
-    for (int i = 0; i < len; i++) {
-        unsigned char index = buffer[i];
-        if (!node->children[index]) break;
-        node = node->children[index];
-        if (node->token_id != -1) {
-            longest_id = node->token_id;
-            longest_len = i + 1;
-        }
-    }
-    
-    *match_len = longest_len;
-    return longest_id;
-}
-
-#define MAX_TOKEN_LEN 1024 // Max length of a single phrase token
+/* --- Encoding --- */
 
 int main(int argc, char *argv[]) {
     if (argc < 4) {
@@ -107,75 +98,112 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    const char *vocab_path = argv[1];
-    const char *input_path = argv[2];
-    const char *output_path = argv[3];
+    load_vocab(argv[1]);
 
-    load_vocab(vocab_path);
-    
-    FILE *fin = fopen(input_path, "rb");
-    if (!fin) { perror("Error opening input"); exit(1); }
-    
-    FILE *fout = fopen(output_path, "wb");
+    /* mmap input file */
+    int fd = open(argv[2], O_RDONLY);
+    if (fd < 0) { perror("Error opening input"); exit(1); }
+
+    struct stat st;
+    if (fstat(fd, &st) < 0) { perror("fstat"); exit(1); }
+    size_t input_len = (size_t)st.st_size;
+
+    const unsigned char *data = mmap(NULL, input_len, PROT_READ,
+                                     MAP_PRIVATE | MAP_POPULATE, fd, 0);
+    if (data == MAP_FAILED) { perror("mmap"); exit(1); }
+    madvise((void *)data, input_len, MADV_SEQUENTIAL);
+    close(fd);
+
+    printf("Encoding %s (%zu bytes) -> %s...\n", argv[2], input_len, argv[3]);
+
+    /* Open output */
+    FILE *fout = fopen(argv[3], "wb");
     if (!fout) { perror("Error opening output"); exit(1); }
-    
-    printf("Encoding %s -> %s...\n", input_path, output_path);
-    
-    // We need a sliding window buffer because greedy matching requires lookahead.
-    // However, our tokens are rarely huge. A circular buffer or just a large buffer with refill is fine.
-    // Simple approach: Read large chunk, process until near end, memmove remaining, read more.
-    
-    unsigned char buffer[BUFFER_SIZE];
-    size_t data_in_buffer = 0;
-    size_t file_offset = 0;
-    int eof = 0;
-    
+
+    /* Output buffer */
+    uint16_t *out_buf = malloc(OUTPUT_BUF_TOKENS * sizeof(uint16_t));
+    if (!out_buf) { fprintf(stderr, "Out of memory\n"); exit(1); }
+    int out_count = 0;
+
+    struct timespec t_start, t_now;
+    clock_gettime(CLOCK_MONOTONIC, &t_start);
+
+    size_t pos = 0;
     long long total_tokens = 0;
 
-    while (!eof || data_in_buffer > 0) {
-        // Refill buffer if needed
-        if (!eof && data_in_buffer < MAX_TOKEN_LEN) {
-            size_t bytes_to_read = BUFFER_SIZE - data_in_buffer;
-            size_t read = fread(buffer + data_in_buffer, 1, bytes_to_read, fin);
-            data_in_buffer += read;
-            if (read < bytes_to_read) eof = 1;
-        }
-        
-        if (data_in_buffer == 0) break;
+    while (pos < input_len) {
+        /* Greedy longest-match trie walk */
+        int32_t node = 0; /* root */
+        int best_id = -1;
+        size_t best_len = 0;
+        size_t remaining = input_len - pos;
+        size_t max_walk = remaining < MAX_TOKEN_LEN ? remaining : MAX_TOKEN_LEN;
 
-        // Greedy match at start of buffer
-        int match_len = 0;
-        int token_id = match_longest(buffer, (data_in_buffer > MAX_TOKEN_LEN ? MAX_TOKEN_LEN : data_in_buffer), &match_len);
-        
-        if (token_id == -1) {
-            // No match? This shouldn't happen if vocab has bytes.
-            // Fallback: take 1 byte as <unk> (ID 1 usually) or verify vocab.
-            // Assuming ID 1 is <unk>.
-            token_id = 1; 
-            match_len = 1;
+        for (size_t i = 0; i < max_walk; i++) {
+            unsigned char c = data[pos + i];
+            int32_t child = pool[node].children[c];
+            if (child == -1) break;
+            node = child;
+
+            /* Prefetch next child speculatively */
+            if (i + 1 < max_walk) {
+                int32_t spec = pool[node].children[data[pos + i + 1]];
+                if (spec != -1)
+                    _mm_prefetch((const char *)&pool[spec], _MM_HINT_T0);
+            }
+
+            if (pool[node].token_id != -1) {
+                best_id = pool[node].token_id;
+                best_len = i + 1;
+            }
         }
-        
-        // Write token (uint16 big endian? Or just native for internal use? Python struct uses native usually, or we specify)
-        // Let's use uint16 LE (standard) or BE. Let's match typical binary format.
-        // I'll write uint16 Little Endian for simplicity with np.fromfile or torch.frombuffer
-        uint16_t out_token = (uint16_t)token_id;
-        fwrite(&out_token, sizeof(uint16_t), 1, fout);
+
+        if (best_id == -1) {
+            /* No match — should not happen if vocab covers all bytes */
+            best_id = 1;
+            best_len = 1;
+        }
+
+        /* Append to output buffer */
+        out_buf[out_count++] = (uint16_t)best_id;
+        if (out_count == OUTPUT_BUF_TOKENS) {
+            fwrite(out_buf, sizeof(uint16_t), out_count, fout);
+            out_count = 0;
+        }
+
+        pos += best_len;
         total_tokens++;
-        
-        // Shift buffer
-        if (match_len < data_in_buffer) {
-            memmove(buffer, buffer + match_len, data_in_buffer - match_len);
-        }
-        data_in_buffer -= match_len;
-        
-        if (total_tokens % 1000000 == 0) {
-            printf("Encoded %lld M tokens...\r", total_tokens / 1000000);
+
+        if ((total_tokens & 0xFFFFF) == 0) { /* every ~1M tokens */
+            clock_gettime(CLOCK_MONOTONIC, &t_now);
+            double elapsed = (t_now.tv_sec - t_start.tv_sec) +
+                             (t_now.tv_nsec - t_start.tv_nsec) / 1e9;
+            double mb_s = (double)pos / (1024.0 * 1024.0) / elapsed;
+            printf("\r  %lld M tokens | %.0f / %.0f MB | %.1f MB/s",
+                   total_tokens / 1000000,
+                   (double)pos / (1024.0 * 1024.0),
+                   (double)input_len / (1024.0 * 1024.0),
+                   mb_s);
             fflush(stdout);
         }
     }
-    
-    printf("\nDone. Total tokens: %lld\n", total_tokens);
-    fclose(fin);
+
+    /* Flush remaining output */
+    if (out_count > 0) {
+        fwrite(out_buf, sizeof(uint16_t), out_count, fout);
+    }
+
+    clock_gettime(CLOCK_MONOTONIC, &t_now);
+    double elapsed = (t_now.tv_sec - t_start.tv_sec) +
+                     (t_now.tv_nsec - t_start.tv_nsec) / 1e9;
+    double mb_s = (double)input_len / (1024.0 * 1024.0) / elapsed;
+
+    printf("\nDone. Total tokens: %lld  |  %.2f sec  |  %.1f MB/s\n",
+           total_tokens, elapsed, mb_s);
+
     fclose(fout);
+    free(out_buf);
+    munmap((void *)data, input_len);
+    free(pool);
     return 0;
 }

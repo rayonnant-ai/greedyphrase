@@ -12,12 +12,13 @@ OUTPUT = "data/enwik9.tokens"
 file_size = os.path.getsize(DATA)
 print(f"enwik9 size: {file_size:,} bytes ({file_size / 1e9:.2f} GB)")
 
-# Train vocab (will re-use existing counts.txt if fast_counter output is there)
+# Always retrain to pick up algorithm changes
+if os.path.exists(VOCAB):
+    os.remove(VOCAB)
+    print(f"Deleted old vocab at {VOCAB}.")
+
 t = GreedyPhraseTokenizer(vocab_size=65536, model_path=VOCAB)
-if not os.path.exists(VOCAB):
-    t.train([DATA], phrase_ratio=0.5)
-else:
-    print(f"Vocab already exists at {VOCAB}, skipping training.")
+t.train([DATA], phrase_ratio=0.95)
 
 # Encode with fast_encoder
 print("\n--- Encoding enwik9 ---")
