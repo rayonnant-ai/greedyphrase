@@ -31,13 +31,16 @@
 | Tiktoken cl100k_base (GPT-4) | 100,277 | 273,662,103 | 3.65x | 7.13 MB/s |
 | Tiktoken o200k_base (GPT-4o) | 200,019 | 270,616,861 | 3.70x | 4.35 MB/s |
 
-## Phase 4: Two-Pass Compound Training (Complete)
-- **Goal:** Capture long phrases (up to 14 atoms) without OOM on large corpora.
+## Phase 4: Iterative Compound Training (Complete)
+- **Goal:** Capture long phrases (up to 21+ atoms) without OOM on large corpora.
 - **Status:** **Success.**
     - Bumped MAX_NGRAM from 6 to 7 in fast_counter.
-    - Added two-pass compound training: Pass 1 encodes with ~52K primitive phrases, counts token bigrams, selects ~10K compound phrases, Pass 2 re-encodes with expanded vocab.
+    - Generalized compound training to N passes (default 2 compounding passes = 3 total encodes).
+    - Each pass: encode → count token bigrams → select top compounds → expand vocab.
+    - Compound budget (10K) split evenly across passes (5K + 5K).
     - Token bigram counting uses numpy vectorized `(a << 16) | b` uint32 packing + `np.unique`.
-    - Vocab budget: 52K primitive + 10K compound + 3.2K BPE = 65.3K.
+    - Tested 2/3/4 total passes on 100M subset: 3 passes = +5.3% over 2, 4 passes = +0.7% over 3 (diminishing returns).
+    - Vocab budget: 52K primitive + 5K comp1 + 5K comp2 + 3.2K BPE = 65.3K.
 
 ### Phase 4 Benchmarks
 
@@ -45,7 +48,7 @@
 
 | Tokenizer | Vocab Size | Total Tokens | Compression Ratio | Enc MB/s |
 | :--- | :--- | :--- | :--- | :--- |
-| **GreedyPhrase (Ours)** | **65,536** | **93,466,213** | **5.77x** | **39.6** |
+| **GreedyPhrase (Ours)** | **65,536** | **89,291,627** | **6.04x** | **42.5** |
 | Tiktoken cl100k_base (GPT-4) | 100,277 | 120,196,189 | 4.49x | 11.9 |
 | Tiktoken o200k_base (GPT-4o) | 200,019 | 119,160,774 | 4.53x | 7.1 |
 
@@ -53,11 +56,10 @@
 
 | Tokenizer | Vocab Size | Total Tokens | Compression Ratio | Enc MB/s |
 | :--- | :--- | :--- | :--- | :--- |
-| **GreedyPhrase (Ours)** | **65,536** | **11,237,250** | **8.90x** | **33.4** |
+| **GreedyPhrase (Ours)** | **65,536** | **10,890,713** | **9.18x** | **36.9** |
 | Tiktoken cl100k_base (GPT-4) | 100,277 | 24,541,816 | 4.07x | 10.9 |
 | Tiktoken o200k_base (GPT-4o) | 200,019 | 24,367,822 | 4.10x | 6.9 |
 
 ## Phase 5: Next Steps
-- **Multi-pass compounding:** Could a third pass (bigrams of compound tokens) push even further?
 - **Corpus-adaptive budget:** Auto-tune primitive/compound/BPE ratio based on corpus statistics.
 - **Model training:** Train GreedyPhrase-1B to validate the "compression is intelligence" hypothesis end-to-end.
