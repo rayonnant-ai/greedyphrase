@@ -9,7 +9,7 @@
 #include <time.h>
 #include <immintrin.h>
 
-#define MAX_TOKEN_LEN 1024
+#define MAX_TOKEN_LEN 4096
 #define OUTPUT_BUF_TOKENS (512 * 1024)  /* 512K tokens = 1MB buffer */
 #define INITIAL_POOL_CAP (1 << 20)      /* 1M nodes initial capacity */
 

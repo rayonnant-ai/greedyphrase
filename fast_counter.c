@@ -12,13 +12,15 @@
 #include <time.h>
 #include <pthread.h>
 
-#define MAX_TOKEN_LEN 256
+#define MAX_TOKEN_LEN 4096
+#define MAX_NGRAM 7
+#define NGRAM_BUF_SIZE 4096
 
 /* Chained hash table with arena-allocated nodes.
- * Per-thread tables: 2^22 (4M buckets, 32MB each).
+ * Per-thread tables: 2^23 (8M buckets, 64MB each).
  * Global merge tables: 2^27 (128M buckets, 1GB each).
  */
-#define THREAD_BITS 22
+#define THREAD_BITS 23
 #define THREAD_SIZE (1U << THREAD_BITS)
 #define THREAD_MASK (THREAD_SIZE - 1)
 
@@ -101,10 +103,8 @@ static inline void ht_add(Node **buckets, uint32_t mask, Arena **ap,
 
 static inline void ht_merge_node(Node **buckets, uint32_t mask, Arena **ap,
                                   const char *key, int len, uint32_t tag, uint32_t count) {
-    uint32_t idx = (uint32_t)((uint64_t)tag << 32 | XXH3_64bits(key, len)) & mask;
-    /* Recompute idx from full hash for global table distribution */
     uint64_t h = XXH3_64bits(key, len);
-    idx = (uint32_t)h & mask;
+    uint32_t idx = (uint32_t)h & mask;
     uint32_t gtag = (uint32_t)(h >> 32);
 
     Node *n = buckets[idx];
@@ -145,7 +145,7 @@ static void init_char_type(void) {
 /* --- Per-thread context --- */
 
 typedef struct {
-    Node **atoms, **bigrams, **trigrams;
+    Node **atoms, **phrases;
     Arena *arena;
     const unsigned char *data;
     size_t start, end, file_size;
@@ -173,10 +173,11 @@ static void *count_thread(void *arg) {
             real_end++;
     }
 
-    uint64_t w1_hash = 0, w2_hash = 0;
-    int w1_len = 0, w2_len = 0;
-    const char *w1_ptr = NULL, *w2_ptr = NULL;
-    char ngram_buf[MAX_TOKEN_LEN * 3];
+    /* Sliding window of previous atoms */
+    const char *win_ptr[MAX_NGRAM - 1];
+    int win_len[MAX_NGRAM - 1];
+    int win_depth = 0;
+    char ngram_buf[NGRAM_BUF_SIZE];
     long long tokens = 0;
 
     while (pos < real_end) {
@@ -191,29 +192,52 @@ static void *count_thread(void *arg) {
         const char *tok = (const char *)data + tok_start;
 
         uint64_t tok_hash = XXH3_64bits(tok, tok_len);
-
         ht_add(ctx->atoms, THREAD_MASK, &ctx->arena, tok, tok_len, tok_hash);
         tokens++;
 
-        if (w2_len > 0) {
-            memcpy(ngram_buf, w2_ptr, w2_len);
-            memcpy(ngram_buf + w2_len, tok, tok_len);
-            int bi_len = w2_len + tok_len;
-            uint64_t bi_hash = XXH3_64bits(ngram_buf, bi_len);
-            ht_add(ctx->bigrams, THREAD_MASK, &ctx->arena, ngram_buf, bi_len, bi_hash);
+        /* Build n-grams from 2 to min(MAX_NGRAM, win_depth+1) */
+        int max_n = win_depth + 1;
+        if (max_n > MAX_NGRAM - 1) max_n = MAX_NGRAM - 1;
 
-            if (w1_len > 0) {
-                memcpy(ngram_buf, w1_ptr, w1_len);
-                memcpy(ngram_buf + w1_len, w2_ptr, w2_len);
-                memcpy(ngram_buf + w1_len + w2_len, tok, tok_len);
-                int tri_len = w1_len + w2_len + tok_len;
-                uint64_t tri_hash = XXH3_64bits(ngram_buf, tri_len);
-                ht_add(ctx->trigrams, THREAD_MASK, &ctx->arena, ngram_buf, tri_len, tri_hash);
+        for (int n = 1; n <= max_n; n++) {
+            /* n-gram = win[win_depth-n] .. win[win_depth-1] + tok
+             * That's (n+1) atoms total, i.e. an (n+1)-gram */
+            int total_len = tok_len;
+            int ok = 1;
+            /* First pass: compute total length */
+            for (int j = 0; j < n; j++) {
+                total_len += win_len[win_depth - n + j];
             }
+            if (total_len >= NGRAM_BUF_SIZE) continue;
+
+            /* Second pass: build the n-gram */
+            int off = 0;
+            for (int j = 0; j < n; j++) {
+                int idx = win_depth - n + j;
+                memcpy(ngram_buf + off, win_ptr[idx], win_len[idx]);
+                off += win_len[idx];
+            }
+            memcpy(ngram_buf + off, tok, tok_len);
+            off += tok_len;
+
+            uint64_t ng_hash = XXH3_64bits(ngram_buf, off);
+            ht_add(ctx->phrases, THREAD_MASK, &ctx->arena, ngram_buf, off, ng_hash);
         }
 
-        w1_ptr = w2_ptr; w1_len = w2_len; w1_hash = w2_hash;
-        w2_ptr = tok;     w2_len = tok_len; w2_hash = tok_hash;
+        /* Shift window */
+        if (win_depth < MAX_NGRAM - 1) {
+            win_ptr[win_depth] = tok;
+            win_len[win_depth] = tok_len;
+            win_depth++;
+        } else {
+            /* Slide: drop oldest, shift left */
+            for (int i = 0; i < MAX_NGRAM - 2; i++) {
+                win_ptr[i] = win_ptr[i + 1];
+                win_len[i] = win_len[i + 1];
+            }
+            win_ptr[MAX_NGRAM - 2] = tok;
+            win_len[MAX_NGRAM - 2] = tok_len;
+        }
     }
 
     ctx->token_count = tokens;
@@ -255,30 +279,40 @@ static void dump_table(Node **buckets, uint32_t size, FILE *out, int min_freq) {
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <file>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <file> [-j threads]\n", argv[0]);
         return 1;
     }
 
     init_char_type();
 
-    int nthreads = (int)sysconf(_SC_NPROCESSORS_ONLN);
-    if (nthreads < 1) nthreads = 1;
-    if (nthreads > 32) nthreads = 32;
+    int nthreads = 0;  /* 0 = auto */
+    const char *input_path = argv[1];
+    for (int i = 2; i < argc; i++) {
+        if (strcmp(argv[i], "-j") == 0 && i + 1 < argc) {
+            nthreads = atoi(argv[++i]);
+        }
+    }
 
     /* mmap input */
-    int fd = open(argv[1], O_RDONLY);
+    int fd = open(input_path, O_RDONLY);
     if (fd < 0) { perror("Error opening file"); return 1; }
     struct stat st;
     fstat(fd, &st);
     size_t file_size = (size_t)st.st_size;
+
+    if (nthreads <= 0) {
+        nthreads = (int)sysconf(_SC_NPROCESSORS_ONLN);
+        if (nthreads < 1) nthreads = 1;
+        if (nthreads > 32) nthreads = 32;
+    }
     const unsigned char *data = mmap(NULL, file_size, PROT_READ,
                                      MAP_PRIVATE | MAP_POPULATE, fd, 0);
     if (data == MAP_FAILED) { perror("mmap"); return 1; }
     madvise((void *)data, file_size, MADV_SEQUENTIAL);
     close(fd);
 
-    printf("Processing %s (%zu bytes) with %d threads\n", argv[1], file_size, nthreads);
-    printf("Per-thread: 3 x %u buckets (%zu MB each)\n",
+    printf("Processing %s (%zu bytes) with %d threads\n", input_path, file_size, nthreads);
+    printf("Per-thread: 2 x %u buckets (%zu MB each)\n",
            THREAD_SIZE, (size_t)THREAD_SIZE * 8 >> 20);
 
     /* Allocate per-thread state */
@@ -287,8 +321,7 @@ int main(int argc, char *argv[]) {
 
     for (int i = 0; i < nthreads; i++) {
         ctxs[i].atoms   = calloc(THREAD_SIZE, sizeof(Node *));
-        ctxs[i].bigrams = calloc(THREAD_SIZE, sizeof(Node *));
-        ctxs[i].trigrams= calloc(THREAD_SIZE, sizeof(Node *));
+        ctxs[i].phrases = calloc(THREAD_SIZE, sizeof(Node *));
         ctxs[i].arena   = arena_new();
         ctxs[i].data    = data;
         ctxs[i].file_size = file_size;
@@ -320,15 +353,13 @@ int main(int argc, char *argv[]) {
            GLOBAL_SIZE, (size_t)GLOBAL_SIZE * 8 >> 20);
 
     Node **g_atoms   = calloc(GLOBAL_SIZE, sizeof(Node *));
-    Node **g_bigrams = calloc(GLOBAL_SIZE, sizeof(Node *));
-    Node **g_trigrams= calloc(GLOBAL_SIZE, sizeof(Node *));
+    Node **g_phrases = calloc(GLOBAL_SIZE, sizeof(Node *));
     Arena *g_arena   = arena_new();
 
     for (int i = 0; i < nthreads; i++) {
-        merge_table(g_atoms,    GLOBAL_MASK, &g_arena, ctxs[i].atoms,   THREAD_SIZE);
-        merge_table(g_bigrams,  GLOBAL_MASK, &g_arena, ctxs[i].bigrams, THREAD_SIZE);
-        merge_table(g_trigrams, GLOBAL_MASK, &g_arena, ctxs[i].trigrams, THREAD_SIZE);
-        free(ctxs[i].atoms); free(ctxs[i].bigrams); free(ctxs[i].trigrams);
+        merge_table(g_atoms,   GLOBAL_MASK, &g_arena, ctxs[i].atoms,   THREAD_SIZE);
+        merge_table(g_phrases, GLOBAL_MASK, &g_arena, ctxs[i].phrases, THREAD_SIZE);
+        free(ctxs[i].atoms); free(ctxs[i].phrases);
         arena_free_all(ctxs[i].arena);
     }
 
@@ -345,10 +376,8 @@ int main(int argc, char *argv[]) {
 
     fprintf(out, "ATOMS\n");
     dump_table(g_atoms, GLOBAL_SIZE, out, 1);
-    fprintf(out, "BIGRAMS\n");
-    dump_table(g_bigrams, GLOBAL_SIZE, out, 50);
-    fprintf(out, "TRIGRAMS\n");
-    dump_table(g_trigrams, GLOBAL_SIZE, out, 50);
+    fprintf(out, "PHRASES\n");
+    dump_table(g_phrases, GLOBAL_SIZE, out, 100);
     fclose(out);
 
     struct timespec t3;
@@ -360,7 +389,7 @@ int main(int argc, char *argv[]) {
            (double)file_size / (1024.0 * 1024.0) / total_s);
 
     munmap((void *)data, file_size);
-    free(g_atoms); free(g_bigrams); free(g_trigrams);
+    free(g_atoms); free(g_phrases);
     arena_free_all(g_arena);
     free(wb); free(ctxs); free(threads);
     printf("Done.\n");

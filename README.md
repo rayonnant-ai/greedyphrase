@@ -2,23 +2,40 @@
 
 A greedy phrase-based tokenizer that outperforms GPT-4 and GPT-4o tokenizers on compression, with a smaller vocabulary.
 
-## Benchmark (enwik9, 1 GB)
+## Benchmarks
+
+### WikiText-103-raw (539 MB, clean Wikipedia prose)
 
 | Tokenizer | Vocab Size | Total Tokens | Compression Ratio | Throughput |
 | :--- | :--- | :--- | :--- | :--- |
-| **GreedyPhrase** | **65,536** | **222,805,405** | **4.49x** | **47 MB/s** |
-| Tiktoken o200k_base (GPT-4o) | 200,019 | 270,616,861 | 3.70x | 4.35 MB/s |
-| Tiktoken cl100k_base (GPT-4) | 100,277 | 273,662,103 | 3.65x | 7.13 MB/s |
+| **GreedyPhrase** | **65,536** | **93,466,213** | **5.77x** | **39.6 MB/s** |
+| Tiktoken cl100k_base (GPT-4) | 100,277 | 120,196,189 | 4.49x | 11.9 MB/s |
+| Tiktoken o200k_base (GPT-4o) | 200,019 | 119,160,774 | 4.53x | 7.1 MB/s |
 
-GreedyPhrase achieves **1.23x better compression** than GPT-4 and **1.21x better** than GPT-4o, with a **1.5-3x smaller vocabulary** and **6-11x higher encoding throughput**.
+**28% better compression** than tiktoken with **1/3 the vocab** and **3-6x faster encoding**.
+
+### TinyStories (100 MB, natural English prose)
+
+| Tokenizer | Vocab Size | Total Tokens | Compression Ratio | Throughput |
+| :--- | :--- | :--- | :--- | :--- |
+| **GreedyPhrase** | **65,536** | **11,237,250** | **8.90x** | **33.4 MB/s** |
+| Tiktoken cl100k_base (GPT-4) | 100,277 | 24,541,816 | 4.07x | 10.9 MB/s |
+| Tiktoken o200k_base (GPT-4o) | 200,019 | 24,367,822 | 4.10x | 6.9 MB/s |
+
+**2.2x better compression** than tiktoken — phrase-based tokenization excels on repetitive natural prose.
 
 ## How It Works
 
-1. **Phrase Mining** — Split text into atoms (words, punctuation, whitespace), then mine bigrams and trigrams. Top phrases fill 95% of vocabulary slots.
-2. **BPE Fallback** — Train BPE on residual byte sequences not covered by phrases. BPE tokens fill the remaining 5% of vocabulary.
-3. **Greedy Encoding** — Longest-match-first via a Trie. Falls back to byte-level tokens for unknown sequences (zero OOV errors).
+GreedyPhrase uses a **two-pass compound training** approach:
 
-The C backend (`fast_counter` + `fast_encoder`) handles gigabyte-scale datasets. `fast_counter` uses 12-thread parallel hashing with xxHash; `fast_encoder` uses mmap + contiguous trie pool. Full train-and-encode on enwik9 (1GB) completes in ~75 seconds.
+1. **Phrase Mining** — Split text into atoms (words, punctuation, whitespace), then count n-grams up to 7 atoms long. Top ~52K phrases become the primitive vocabulary.
+2. **Compound Phrases** — Encode the corpus with the primitive vocab, then count consecutive token pairs. The top ~10K bigrams (each concatenating two phrases into a compound up to 14 atoms long) are added to the vocabulary.
+3. **BPE Fallback** — Re-encode with the expanded vocab. Train BPE on residual byte sequences. ~3K BPE tokens fill the remaining slots.
+4. **Greedy Encoding** — Longest-match-first via a Trie. Falls back to byte-level tokens for unknown sequences (zero OOV errors).
+
+This two-pass approach captures long phrases (up to 14 atoms) without the memory cost of directly counting 14-grams.
+
+The C backend (`fast_counter` + `fast_encoder`) handles gigabyte-scale datasets. `fast_counter` uses 12-thread parallel hashing with xxHash; `fast_encoder` uses mmap + contiguous trie pool with speculative prefetch.
 
 ## Quick Start
 
@@ -31,41 +48,45 @@ gcc -O3 -march=native -o fast_encoder fast_encoder.c
 python -c "
 from greedyphrase import GreedyPhraseTokenizer
 t = GreedyPhraseTokenizer(vocab_size=65536, model_path='tokenizer/greedyphrase.vocab')
-t.train(['data/enwik9'], phrase_ratio=0.5)
+t.train(['data/wikitext103.txt'])
 "
 
 # Encode a file
 python -c "
 from greedyphrase import GreedyPhraseTokenizer
 t = GreedyPhraseTokenizer(vocab_size=65536, model_path='tokenizer/greedyphrase.vocab')
-t.encode_file('data/enwik9', 'data/enwik9.tokens')
+t.encode_file('data/wikitext103.txt', 'data/wikitext103.tokens')
 "
 ```
 
 ## Run Benchmarks
 
 ```bash
-# GreedyPhrase on enwik9
-python benchmark_enwik9.py
+# WikiText-103
+python benchmark_wikitext.py
 
-# Tiktoken (GPT-4, GPT-4o) on enwik9
-pip install tiktoken
-python benchmark/bench_tiktoken.py
+# TinyStories
+python benchmark_tinystories.py
+
+# enwik9
+python benchmark_enwik9.py
 ```
 
 ## Project Structure
 
 ```
-greedyphrase.py        # GreedyPhraseTokenizer — train, encode, decode
-fast_counter.c         # Multithreaded n-gram counter (xxHash + 12 threads)
-fast_encoder.c         # Trie-based greedy encoder (mmap + node pool + prefetch)
-xxhash.h               # xxHash single-header library (vendored)
-benchmark_enwik9.py    # GreedyPhrase enwik9 benchmark
-benchmark/             # Baseline benchmarks (tiktoken, etc.)
-tokenizer/             # Trained vocab files
-data/                  # Datasets (enwik9)
-GreedyPhrase.md        # Paper
-RESEARCHPLAN.md        # Research plan and roadmap
+greedyphrase.py           # GreedyPhraseTokenizer — train, encode, decode
+fast_counter.c            # Multithreaded n-gram counter (xxHash, 7-gram, 12 threads)
+fast_encoder.c            # Trie-based greedy encoder (mmap + node pool + prefetch)
+xxhash.h                  # xxHash single-header library (vendored)
+benchmark_wikitext.py     # WikiText-103 benchmark (GreedyPhrase + tiktoken)
+benchmark_tinystories.py  # TinyStories benchmark
+benchmark_enwik9.py       # enwik9 benchmark
+tokenizer/                # Trained vocab files
+data/                     # Datasets
+GreedyPhrase.md           # Paper
+RESEARCHPLAN.md           # Research plan and roadmap
+RESEARCHLOG.md            # Detailed engineering log
 ```
 
 ## Citation
