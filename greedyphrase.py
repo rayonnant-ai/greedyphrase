@@ -171,13 +171,16 @@ class GreedyPhraseTokenizer:
             )
         return encoder_bin
 
-    def train(self, file_paths: List[str], compound_slots=10000, bpe_slots=3264):
+    def train(self, file_paths: List[str], compound_slots=10000, bpe_slots=3264,
+              compound_passes=2):
         """
         Trains the tokenizer vocabulary from a list of files.
-        Two-pass approach:
+        Multi-pass compound approach:
           Pass 1: Count primitive n-grams (up to 7 atoms), build vocab, encode
-          Pass 2: Count bigrams of Pass 1 tokens to form compound phrases (up to 14 atoms)
-        Then BPE on residuals.
+          Pass 2..N: Count bigrams of previous pass's tokens to form compound
+                     phrases (each pass doubles max reach). Compound budget is
+                     split evenly across compounding passes.
+        Then BPE on residuals from the final pass.
         """
         print(f"Training tokenizer on {len(file_paths)} files using fast_counter...", flush=True)
 
@@ -251,7 +254,10 @@ class GreedyPhraseTokenizer:
         remaining_slots = self.vocab_size - total_reserved  # 65276
 
         num_primitive_slots = remaining_slots - compound_slots - bpe_slots
-        print(f"Budget: {num_primitive_slots} primitive + {compound_slots} compound + {bpe_slots} BPE = {remaining_slots}", flush=True)
+        slots_per_pass = compound_slots // compound_passes
+        print(f"Budget: {num_primitive_slots} primitive + {compound_slots} compound "
+              f"({slots_per_pass}x{compound_passes} passes) + {bpe_slots} BPE = {remaining_slots}",
+              flush=True)
 
         # ── Step A: Select primitive phrases ──
         print("Selecting primitive phrases...", flush=True)
@@ -270,9 +276,9 @@ class GreedyPhraseTokenizer:
 
         print(f"  Selected {len(primitive_entries)} primitive phrases.", flush=True)
 
-        # ── Step B: Pass 1 encode ──
-        print("Pass 1: encoding with primitive vocab...", flush=True)
-        partial_vocab = reserved_tokens + reserved_bytes + primitive_entries
+        # ── Iterative compound passes ──
+        current_vocab = reserved_tokens + reserved_bytes + primitive_entries
+        all_compound_entries = []
 
         tmp_vocab_fd, tmp_vocab_path = tempfile.mkstemp(suffix='.vocab')
         os.close(tmp_vocab_fd)
@@ -280,10 +286,57 @@ class GreedyPhraseTokenizer:
         os.close(tmp_tokens_fd)
 
         try:
-            self._save_vocab(partial_vocab, tmp_vocab_path)
-
             encoder_bin = self._ensure_fast_encoder()
-            print(f"  Running fast_encoder (primitive vocab, {len(partial_vocab)} tokens)...", flush=True)
+
+            for pass_num in range(1, compound_passes + 1):
+                print(f"Pass {pass_num}: encoding with {len(current_vocab)} tokens...", flush=True)
+                self._save_vocab(current_vocab, tmp_vocab_path)
+                subprocess.run(
+                    [encoder_bin, tmp_vocab_path, target_file, tmp_tokens_path],
+                    check=True
+                )
+
+                token_data = open(tmp_tokens_path, 'rb').read()
+                num_tokens = len(token_data) // 2
+                print(f"  Pass {pass_num} produced {num_tokens:,} tokens.", flush=True)
+
+                # Count token bigrams — relax min_freq for later passes
+                min_freq = max(50, 125 - pass_num * 25)
+                print(f"  Counting token bigrams (min_freq={min_freq})...", flush=True)
+                bigram_counts = count_token_bigrams(tmp_tokens_path, min_freq=min_freq)
+                print(f"  Found {len(bigram_counts):,} bigram types.", flush=True)
+
+                # Build compound phrases from bigrams
+                compound_candidates = []
+                for (id_a, id_b), freq in bigram_counts.items():
+                    if id_a >= len(current_vocab) or id_b >= len(current_vocab):
+                        continue
+                    compound = current_vocab[id_a] + current_vocab[id_b]
+                    if len(compound) <= 1:
+                        continue
+                    score = freq * len(compound)
+                    compound_candidates.append((score, compound))
+
+                compound_candidates.sort(reverse=True)
+
+                # Dedup against everything already in vocab
+                existing = set(current_vocab)
+                new_compounds = []
+                for _, compound in compound_candidates:
+                    if compound in existing:
+                        continue
+                    existing.add(compound)
+                    new_compounds.append(compound)
+                    if len(new_compounds) >= slots_per_pass:
+                        break
+
+                print(f"  Selected {len(new_compounds)} compound phrases (pass {pass_num}).", flush=True)
+                all_compound_entries.extend(new_compounds)
+                current_vocab = reserved_tokens + reserved_bytes + primitive_entries + all_compound_entries
+
+            # ── Final encode to collect residuals ──
+            print(f"Final encode: {len(current_vocab)} tokens...", flush=True)
+            self._save_vocab(current_vocab, tmp_vocab_path)
             subprocess.run(
                 [encoder_bin, tmp_vocab_path, target_file, tmp_tokens_path],
                 check=True
@@ -291,59 +344,9 @@ class GreedyPhraseTokenizer:
 
             token_data = open(tmp_tokens_path, 'rb').read()
             num_tokens = len(token_data) // 2
-            print(f"  Pass 1 produced {num_tokens:,} tokens.", flush=True)
+            print(f"  Final encode produced {num_tokens:,} tokens.", flush=True)
 
-            # ── Step C: Count token bigrams → compound phrases ──
-            print("Counting token bigrams...", flush=True)
-            bigram_counts = count_token_bigrams(tmp_tokens_path, min_freq=100)
-            print(f"  Found {len(bigram_counts):,} bigram types (freq >= 100).", flush=True)
-
-            # Build compound phrases: for each bigram (id_a, id_b), concat their bytes
-            primitive_set = set(primitive_entries)
-            compound_candidates = []
-            for (id_a, id_b), freq in bigram_counts.items():
-                if id_a >= len(partial_vocab) or id_b >= len(partial_vocab):
-                    continue
-                bytes_a = partial_vocab[id_a]
-                bytes_b = partial_vocab[id_b]
-                compound = bytes_a + bytes_b
-                # Skip if already in primitive vocab or reserved
-                if compound in primitive_set or len(compound) <= 1:
-                    continue
-                score = freq * len(compound)
-                compound_candidates.append((score, compound, freq))
-
-            compound_candidates.sort(reverse=True)
-
-            # Dedup — take top compound_slots unique compounds
-            compound_entries = []
-            seen_compounds = set(reserved_tokens) | set(reserved_bytes) | primitive_set
-            for _, compound, freq in compound_candidates:
-                if compound in seen_compounds:
-                    continue
-                seen_compounds.add(compound)
-                compound_entries.append(compound)
-                if len(compound_entries) >= compound_slots:
-                    break
-
-            print(f"  Selected {len(compound_entries)} compound phrases.", flush=True)
-
-            # ── Step D: Pass 2 encode with expanded vocab ──
-            print("Pass 2: encoding with primitive + compound vocab...", flush=True)
-            expanded_vocab = reserved_tokens + reserved_bytes + primitive_entries + compound_entries
-
-            self._save_vocab(expanded_vocab, tmp_vocab_path)
-            print(f"  Running fast_encoder (expanded vocab, {len(expanded_vocab)} tokens)...", flush=True)
-            subprocess.run(
-                [encoder_bin, tmp_vocab_path, target_file, tmp_tokens_path],
-                check=True
-            )
-
-            token_data = open(tmp_tokens_path, 'rb').read()
-            num_tokens = len(token_data) // 2
-            print(f"  Pass 2 produced {num_tokens:,} tokens.", flush=True)
-
-            # ── Step E: Collect residuals from Pass 2 ──
+            # Collect residuals
             residuals = []
             current_run = bytearray()
 
@@ -366,16 +369,16 @@ class GreedyPhraseTokenizer:
             os.unlink(tmp_vocab_path)
             os.unlink(tmp_tokens_path)
 
-        # ── Step F: Train BPE on residuals ──
+        # ── Train BPE on residuals ──
         print(f"Training BPE on residuals ({bpe_slots} merges)...", flush=True)
         bpe_tokens = train_bpe(residuals, bpe_slots)
 
-        existing = set(reserved_tokens + reserved_bytes + primitive_entries + compound_entries)
+        existing = set(current_vocab)
         bpe_tokens = [t for t in bpe_tokens if t not in existing and len(t) < 4096]
         print(f"  Got {len(bpe_tokens)} unique BPE tokens.", flush=True)
 
         # ── Build final vocab ──
-        self.vocab = reserved_tokens + reserved_bytes + primitive_entries + compound_entries + bpe_tokens
+        self.vocab = current_vocab + bpe_tokens
 
         if len(self.vocab) > self.vocab_size:
             self.vocab = self.vocab[:self.vocab_size]
@@ -387,7 +390,7 @@ class GreedyPhraseTokenizer:
         print(f"  - Special: {len(reserved_tokens)}", flush=True)
         print(f"  - Bytes: {len(reserved_bytes)}", flush=True)
         print(f"  - Primitives: {len(primitive_entries)}", flush=True)
-        print(f"  - Compounds: {len(compound_entries)}", flush=True)
+        print(f"  - Compounds: {len(all_compound_entries)} ({compound_passes} passes)", flush=True)
         print(f"  - BPE: {len(bpe_tokens)}", flush=True)
         self.save(self.model_path)
 

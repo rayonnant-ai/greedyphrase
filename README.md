@@ -8,32 +8,33 @@ A greedy phrase-based tokenizer that outperforms GPT-4 and GPT-4o tokenizers on 
 
 | Tokenizer | Vocab Size | Total Tokens | Compression Ratio | Throughput |
 | :--- | :--- | :--- | :--- | :--- |
-| **GreedyPhrase** | **65,536** | **93,466,213** | **5.77x** | **39.6 MB/s** |
+| **GreedyPhrase** | **65,536** | **89,291,627** | **6.04x** | **42.5 MB/s** |
 | Tiktoken cl100k_base (GPT-4) | 100,277 | 120,196,189 | 4.49x | 11.9 MB/s |
 | Tiktoken o200k_base (GPT-4o) | 200,019 | 119,160,774 | 4.53x | 7.1 MB/s |
 
-**28% better compression** than tiktoken with **1/3 the vocab** and **3-6x faster encoding**.
+**34% better compression** than tiktoken with **1/3 the vocab** and **3-6x faster encoding**.
 
 ### TinyStories (100 MB, natural English prose)
 
 | Tokenizer | Vocab Size | Total Tokens | Compression Ratio | Throughput |
 | :--- | :--- | :--- | :--- | :--- |
-| **GreedyPhrase** | **65,536** | **11,237,250** | **8.90x** | **33.4 MB/s** |
+| **GreedyPhrase** | **65,536** | **10,890,713** | **9.18x** | **36.9 MB/s** |
 | Tiktoken cl100k_base (GPT-4) | 100,277 | 24,541,816 | 4.07x | 10.9 MB/s |
 | Tiktoken o200k_base (GPT-4o) | 200,019 | 24,367,822 | 4.10x | 6.9 MB/s |
 
-**2.2x better compression** than tiktoken — phrase-based tokenization excels on repetitive natural prose.
+**2.24x better compression** than tiktoken — phrase-based tokenization excels on repetitive natural prose.
 
 ## How It Works
 
-GreedyPhrase uses a **two-pass compound training** approach:
+GreedyPhrase uses **iterative compound training** (3 passes by default):
 
 1. **Phrase Mining** — Split text into atoms (words, punctuation, whitespace), then count n-grams up to 7 atoms long. Top ~52K phrases become the primitive vocabulary.
-2. **Compound Phrases** — Encode the corpus with the primitive vocab, then count consecutive token pairs. The top ~10K bigrams (each concatenating two phrases into a compound up to 14 atoms long) are added to the vocabulary.
-3. **BPE Fallback** — Re-encode with the expanded vocab. Train BPE on residual byte sequences. ~3K BPE tokens fill the remaining slots.
-4. **Greedy Encoding** — Longest-match-first via a Trie. Falls back to byte-level tokens for unknown sequences (zero OOV errors).
+2. **Compound Pass 1** — Encode the corpus with the primitive vocab, then count consecutive token pairs. The top ~5K bigrams (each concatenating two phrases into a compound up to 14 atoms) are added to the vocabulary.
+3. **Compound Pass 2** — Re-encode with the expanded vocab and count token pairs again. The top ~5K bigrams of compound tokens yield triple-compounds up to 21+ atoms long.
+4. **BPE Fallback** — Re-encode with the full vocab. Train BPE on residual byte sequences. ~3K BPE tokens fill the remaining slots.
+5. **Greedy Encoding** — Longest-match-first via a Trie. Falls back to byte-level tokens for unknown sequences (zero OOV errors).
 
-This two-pass approach captures long phrases (up to 14 atoms) without the memory cost of directly counting 14-grams.
+Each compounding pass doubles the maximum phrase reach without ever counting high-order n-grams directly (which would OOM on large corpora).
 
 The C backend (`fast_counter` + `fast_encoder`) handles gigabyte-scale datasets. `fast_counter` uses 12-thread parallel hashing with xxHash; `fast_encoder` uses mmap + contiguous trie pool with speculative prefetch.
 
