@@ -210,14 +210,13 @@ class GreedyPhraseTokenizer:
         self._ensure_c_binary("fast_template_miner")
 
     def _mine_linguistic_templates(self, target_file, budget=2000, min_freq=100):
-        """Mine templates using the fast C pipeline."""
+        """Mine templates using the fast C pipeline (Multi-pass)."""
         base_dir = os.path.dirname(os.path.abspath(__file__))
         data_dir = os.path.join(base_dir, "data")
         os.makedirs(data_dir, exist_ok=True)
         
         masked_words = os.path.join(data_dir, "masked_words.bin")
         mask_vocab = os.path.join(data_dir, "mask_vocab.bin")
-        raw_templates = os.path.join(data_dir, "raw_templates.txt")
         winning_templates = os.path.join(data_dir, "winning_templates.txt")
         
         self._ensure_miner()
@@ -226,30 +225,45 @@ class GreedyPhraseTokenizer:
         mask_bin = os.path.join(base_dir, "fast_mask")
         subprocess.run([mask_bin, target_file, masked_words, mask_vocab], check=True)
         
-        print(f"  Step 2: Mining n-grams from masked stream...", flush=True)
+        print(f"  Step 2: Mining n-grams from masked stream (Multi-pass)...", flush=True)
         miner_bin = os.path.join(base_dir, "fast_template_miner")
-        subprocess.run([miner_bin, masked_words, mask_vocab, raw_templates, str(min_freq), "8"], check=True)
         
-        print(f"  Step 3: Promoting top {budget} templates...", flush=True)
-        # We can do promotion in Python
-        templates = []
-        with open(raw_templates, 'r', encoding='latin-1') as f:
-            for line in f:
-                parts = line.strip().split(' ')
-                if len(parts) < 2: continue
-                try:
-                    count = int(parts[0])
-                    tokens = parts[1:]
-                    num_slots = tokens.count(';?')
-                    length = len(tokens)
-                    saved = length - (1 + num_slots)
-                    if saved <= 0: continue
-                    score = count * saved
-                    templates.append((score, count, tokens))
-                except ValueError: continue
+        # Split mining into 3 passes to avoid OOM with large thread count
+        # Pass 1: 5..8, Pass 2: 9..12, Pass 3: 13..15
+        passes = [(5, 8), (9, 12), (13, 15)]
+        all_templates = []
         
-        templates.sort(key=lambda x: -x[0])
-        winners = templates[:budget]
+        for i, (min_n, max_n) in enumerate(passes):
+            print(f"    Pass {i+1}: Mining L={min_n}..{max_n}...", flush=True)
+            raw_templates_part = os.path.join(data_dir, f"raw_templates_p{i+1}.txt")
+            if os.path.exists(raw_templates_part): os.remove(raw_templates_part)
+            
+            subprocess.run([
+                miner_bin, masked_words, mask_vocab, raw_templates_part, 
+                str(min_freq), str(min_n), str(max_n), "12"
+            ], check=True)
+            
+            # Load and merge results immediately to save disk/memory
+            with open(raw_templates_part, 'r', encoding='latin-1') as f:
+                for line in f:
+                    parts = line.strip().split(' ')
+                    if len(parts) < 2: continue
+                    try:
+                        count = int(parts[0])
+                        tokens = parts[1:]
+                        num_slots = tokens.count(';?')
+                        length = len(tokens)
+                        saved = length - (1 + num_slots)
+                        if saved <= 0: continue
+                        score = count * saved
+                        all_templates.append((score, count, tokens))
+                    except ValueError: continue
+            
+            os.remove(raw_templates_part) # Cleanup
+        
+        print(f"  Step 3: Promoting top {budget} templates from {len(all_templates)} candidates...", flush=True)
+        all_templates.sort(key=lambda x: -x[0])
+        winners = all_templates[:budget]
         
         # Save winners for inspection
         with open(winning_templates, 'w', encoding='latin-1') as f:
@@ -267,8 +281,12 @@ class GreedyPhraseTokenizer:
         target_file = file_paths[0]
 
         # ── New Step 0: Mine Linguistic Templates ──
-        print("Mining linguistic templates (Phase 7C)...", flush=True)
-        winning_templates_data = self._mine_linguistic_templates(target_file, budget=template_budget)
+        winning_templates_data = []
+        if template_budget > 0:
+            print("Mining linguistic templates (Phase 7C)...", flush=True)
+            winning_templates_data = self._mine_linguistic_templates(target_file, budget=template_budget)
+        else:
+            print("Skipping linguistic template mining (budget=0)...", flush=True)
 
         # Determine path to fast_counter binary
         base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -302,19 +320,21 @@ class GreedyPhraseTokenizer:
                     except ValueError: continue
 
         # ── Candidate Pool ──
+        # type 0: Token (bytes), type 1: Template (TemplateInfo)
         candidate_pool = []
         
-        # Add literal words from templates to pool with high score
-        template_literals = set()
-        for _, _, words in winning_templates_data:
+        # Add mined linguistic templates to pool
+        template_candidates = []
+        for score, count, words in winning_templates_data:
+            # We need to store the word list to reconstruct the TemplateInfo later
+            candidate_pool.append((count, 1, words))
+            
+            # Also add literal words to pool with high frequency to ensure they exist
             for w in words:
-                if w != ';?': template_literals.add(w)
-        
-        print(f"Adding {len(template_literals)} template literals to pool...", flush=True)
-        for w in template_literals:
-            candidate_pool.append((1e15, 0, w.encode('latin-1'))) # Very high score to ensure selection
+                if w != ';?':
+                    candidate_pool.append((1e12, 0, w.encode('latin-1')))
 
-        # Collect Primitives
+        # Collect Primitives from fast_counter
         all_phrase_freqs = collections.Counter()
         for atom, freq in atom_freqs.items():
             b = atom.encode('latin-1')
@@ -381,30 +401,76 @@ class GreedyPhraseTokenizer:
         # ── Step E: The Grand Cull ──
         candidate_pool.sort(key=lambda x: -x[0])
         total_reserved = len(reserved_tokens) + len(reserved_bytes)
-        slots_for_market = max_vocab_size - total_reserved - len(bpe_tokens)
+        # We need to account for both winning tokens and winning templates
+        # market_budget = max_vocab_size - total_reserved - len(bpe_tokens)
         
-        winners = candidate_pool[:slots_for_market]
-        final_vocab = reserved_tokens + reserved_bytes
+        # Split winners
         winning_tokens = []
+        winning_templates_data = [] # List of word lists
         
-        seen_tokens = set(final_vocab)
-        for score, type, data in winners:
+        seen_tokens = set(reserved_tokens + reserved_bytes)
+        
+        # We iterate and pick until we hit max_vocab_size
+        current_vocab_size = total_reserved + len(bpe_tokens)
+        
+        for freq, type, data in candidate_pool:
+            if current_vocab_size >= max_vocab_size:
+                break
+                
             if type == 0: # Token
                 if data not in seen_tokens:
                     winning_tokens.append(data)
                     seen_tokens.add(data)
+                    current_vocab_size += 1
+            elif type == 1: # Template
+                winning_templates_data.append(data)
+                current_vocab_size += 1
         
+        # Add BPE tokens (ensuring they fit)
+        # In practice, BPE is small, but let's be robust
         for t in bpe_tokens:
             if t not in seen_tokens:
-                winning_tokens.append(t)
-                seen_tokens.add(t)
+                if len(winning_tokens) + len(reserved_tokens) + len(reserved_bytes) + len(winning_templates_data) < max_vocab_size:
+                    winning_tokens.append(t)
+                    seen_tokens.add(t)
+                else:
+                    # If we are over, we have to drop something. 
+                    # Usually BPE is kept, so we might drop the last winners.
+                    pass
 
-        self.vocab = final_vocab + winning_tokens
+        self.vocab = reserved_tokens + reserved_bytes + winning_tokens
         self.token_to_id = {token: i for i, token in enumerate(self.vocab)}
 
-        self._build_trie()
-        if self.templates: self._build_template_index()
-        self.save(self.model_path)
+        # Map winning templates to final IDs
+        self.templates = {}
+        base_id = len(self.vocab)
+        valid_template_count = 0
+        
+        for words in winning_templates_data:
+            frame = []
+            slot_positions = []
+            valid = True
+            for i, w in enumerate(words):
+                if w == ';?':
+                    frame.append(SLOT_SENTINEL)
+                    slot_positions.append(i)
+                else:
+                    b = w.encode('latin-1')
+                    if b in self.token_to_id:
+                        frame.append(self.token_to_id[b])
+                    else:
+                        valid = False
+                        break
+            if valid:
+                vid = base_id + valid_template_count
+                self.templates[vid] = TemplateInfo(
+                    vocab_id=vid,
+                    length=len(frame),
+                    num_slots=len(slot_positions),
+                    frame=frame,
+                    slot_positions=slot_positions
+                )
+                valid_template_count += 1
 
     def _build_trie(self):
         """

@@ -19,15 +19,15 @@
 #define MIN_LITERAL_LEN 15
 
 /* Hash Table Config */
-#define THREAD_BITS 22
+#define THREAD_BITS 20
 #define THREAD_SIZE (1U << THREAD_BITS)
 #define THREAD_MASK (THREAD_SIZE - 1)
 
-#define GLOBAL_BITS 25
+#define GLOBAL_BITS 23
 #define GLOBAL_SIZE (1U << GLOBAL_BITS)
 #define GLOBAL_MASK (GLOBAL_SIZE - 1)
 
-#define ARENA_BLOCK (128 * 1024 * 1024)
+#define ARENA_BLOCK (64 * 1024 * 1024)
 
 /* ─── Arena ─── */
 typedef struct Arena { char *base; size_t used, cap; struct Arena *prev; } Arena;
@@ -102,6 +102,8 @@ static uint32_t  g_n_words;
 static uint32_t *g_vocab_lens;
 static char    **g_vocab_words;
 static uint32_t  g_vocab_size;
+static int       g_min_n;
+static int       g_max_n;
 
 /* ─── Threading ─── */
 typedef struct {
@@ -128,18 +130,18 @@ static void *mine_thread(void *arg) {
         if (pos < g_n_words) pos++;
 
         uint32_t llen = lend - lstart;
-        if (llen < MIN_WINDOW) continue;
+        if (llen < (uint32_t)g_min_n) continue;
 
         const uint32_t *line = g_words + lstart;
 
         for (uint32_t i = 0; i < llen; i++) {
             int total_lit = 0;
-            for (int L = 1; L <= MAX_WINDOW && i + L <= llen; L++) {
+            for (int L = 1; L <= g_max_n && i + L <= llen; L++) {
                 uint32_t wid = line[i + L - 1];
                 if (wid != SENTINEL_ID) {
                     total_lit += g_vocab_lens[wid];
                 }
-                if (L >= MIN_WINDOW && total_lit >= MIN_LITERAL_LEN) {
+                if (L >= g_min_n && total_lit >= MIN_LITERAL_LEN) {
                     /* Only keep if it has at least one sentinel */
                     int has_sentinel = 0;
                     for (int k = 0; k < L; k++) if (line[i + k] == SENTINEL_ID) { has_sentinel = 1; break; }
@@ -178,12 +180,14 @@ static void *merge_thread(void *arg) {
 }
 
 int main(int argc, char **argv) {
-    if (argc < 5) {
-        fprintf(stderr, "Usage: %s <masked_words.bin> <mask_vocab.bin> <out_templates.txt> <min_freq> [threads]\n", argv[0]);
+    if (argc < 7) {
+        fprintf(stderr, "Usage: %s <masked_words.bin> <mask_vocab.bin> <out_templates.txt> <min_freq> <min_n> <max_n> [threads]\n", argv[0]);
         return 1;
     }
     int min_freq = atoi(argv[4]);
-    int n_threads = (argc > 5) ? atoi(argv[5]) : (int)sysconf(_SC_NPROCESSORS_ONLN);
+    g_min_n = atoi(argv[5]);
+    g_max_n = atoi(argv[6]);
+    int n_threads = (argc > 7) ? atoi(argv[7]) : (int)sysconf(_SC_NPROCESSORS_ONLN);
 
     /* Load vocab */
     FILE *vf = fopen(argv[2], "rb");

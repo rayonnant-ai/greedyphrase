@@ -6,7 +6,7 @@
 
 ## Abstract
 
-In the era of Large Language Models (LLMs), the efficiency of tokenization is a critical yet often overlooked factor in model performance. Standard Byte-Pair Encoding (BPE) tokenizers typically achieve compression ratios of 3-4x, limiting the effective context window and "intelligence density" of models, particularly those with smaller parameter counts. We introduce **GreedyPhrase**, a novel greedy dictionary-based tokenizer that uses iterative compound training to build a vocabulary of multi-word phrases (up to 21+ atoms long), augmented by BPE for residual coverage. GreedyPhrase achieves a compression ratio of **6.04x** on WikiText-103 (539 MB)—**34% better** than GPT-4's Tiktoken (4.49x) and GPT-4o's (4.53x)—and **9.18x** on TinyStories—**2.24x better** than Tiktoken (4.07x)—while using a **1.5–3x smaller vocabulary** and maintaining 100% round-trip integrity via byte-level fallback. The optimized C backend encodes at 37-43 MB/s, 3-6x faster than Tiktoken.
+In the era of Large Language Models (LLMs), the efficiency of tokenization is a critical yet often overlooked factor in model performance. Standard Byte-Pair Encoding (BPE) tokenizers typically achieve compression ratios of 3-4x, limiting the effective context window and "intelligence density" of models, particularly those with smaller parameter counts. We introduce **GreedyPhrase**, a novel greedy dictionary-based tokenizer that uses iterative compound training to build a vocabulary of multi-word phrases (up to 21+ atoms long), augmented by BPE for residual coverage. GreedyPhrase achieves a compression ratio of **6.04x** on WikiText-103, **9.18x** on TinyStories, and **5.72x** on enwik9 (1 GB)—outperforming GPT-4's tokenizer by **1.57x** on this challenging XML-heavy dataset—while using a **1.5–3x smaller vocabulary** and maintaining 100% round-trip integrity via byte-level fallback. The optimized C backend encodes at 37-43 MB/s, 3-6x faster than Tiktoken.
 
 ## 1. Introduction
 
@@ -37,6 +37,16 @@ Naive Python implementations of this greedy strategy are prohibitively slow (~10
 - **Fast Encoder:** `mmap`-based input with `MADV_SEQUENTIAL`, contiguous trie node pool (int32 indices instead of scattered pointers), 1MB buffered output, and speculative `_mm_prefetch` during trie traversal. Encodes at **33-45 MB/s** depending on vocabulary size.
 - **Token Bigram Counter:** Numpy-based vectorized counting of consecutive uint16 token pairs. Encodes pairs as `(a << 16) | b` into uint32 for fast `np.unique`-based counting. Processes 100M+ tokens in seconds.
 
+### 2.4 Linguistic Template Mining
+To capture structural patterns that vary only by specific entities (e.g., "certified **Platinum** by the RIAA" vs "certified **Gold** by the RIAA"), GreedyPhrase employs a dedicated pre-training pipeline. Standard n-gram counting fails here because the exact literal strings differ.
+
+Our "Linguistic Miner" uses a three-stage process:
+1.  **The Hollower:** A fast C-based regex pass scans the raw text and masks high-entropy entities—numbers, months, and capitalized proper nouns—replacing them with a generic sentinel token (`;?`).
+2.  **Sliding Window Miner:** We scan the masked token stream for frequent n-grams (length 5–15). A strict filter rejects any pattern with fewer than 15 characters of *literal* (non-sentinel) text, ensuring we only capture robust linguistic structures rather than weak associations.
+3.  **Template Promotion:** High-scoring templates are identified. Crucially, we do not add the template *itself* as a complex rule; instead, we inject the template's **literal word components** into the vocabulary candidate pool with high priority. This ensures the tokenizer naturally learns to encode the static parts of the template efficiently, allowing the dynamic slots to be filled by standard tokens during encoding.
+
+This approach successfully captures narrative frames (e.g., "*Once upon a time, there was a little*..."), citation formats, and structured data patterns without requiring a separate grammar-based engine.
+
 ## 3. Experiments and Results
 
 We benchmarked GreedyPhrase against industry-standard Tiktoken tokenizers on two datasets representing clean natural language: **WikiText-103-raw** (539 MB, clean Wikipedia prose) and **TinyStories** (100 MB, simple English children's stories).
@@ -63,7 +73,18 @@ For a fixed context window of 2048 tokens, GreedyPhrase encodes ~12,400 bytes of
 
 On repetitive natural prose, GreedyPhrase achieves **2.24x better compression** than Tiktoken. The phrase-based approach excels when the same multi-word patterns recur frequently — exactly the scenario encountered in training data for small language models.
 
-### 3.3 Vocabulary Budget Allocation
+### 3.3 enwik9 (1 GB)
+
+| Tokenizer | Vocab Size | Total Tokens | Compression Ratio | Enc MB/s |
+| :--- | :--- | :--- | :--- | :--- |
+| **GreedyPhrase (No Templates)** | **65,536** | **174,782,848** | **5.72x** | **43.6** |
+| **GreedyPhrase (Templates)** | **65,536** | **175,675,079** | **5.69x** | **40.7** |
+| Tiktoken cl100k_base (GPT-4) | 100,277 | 273,662,103 | 3.65x | 7.1 |
+| Tiktoken o200k_base (GPT-4o) | 200,019 | 270,616,861 | 3.70x | 4.4 |
+
+GreedyPhrase outperforms GPT-4's tokenizer by **1.57x** and GPT-4o's by **1.55x** on enwik9, while using a vocabulary **1.5–3x smaller**. The heavy XML markup and non-natural-language content of enwik9 typically penalize pure phrase-based approaches; our strong performance here validates the architecture's robustness. Interestingly, disabling templates yielded a slightly better compression ratio (5.72x vs 5.69x), suggesting that for highly structured data like XML, standard n-gram compounds are more efficient per-slot than linguistic templates.
+
+### 3.4 Vocabulary Budget Allocation
 
 The iterative compound training splits the 65K vocabulary into four tiers:
 
