@@ -48,6 +48,31 @@ GreedyPhrase uses **iterative compound training** (3 passes by default):
 
 Each compounding pass doubles the maximum phrase reach without ever counting high-order n-grams directly (which would OOM on large corpora).
 
+## Configuration Options
+
+You can tune the tokenizer by passing arguments to the `train()` method or the constructor:
+
+- **`vocab_size`** (default: `65536`): The total number of token IDs available. GreedyPhrase uses a "Free Market" approach where all candidates (primitives, compounds, templates, BPE) compete for these slots based on frequency.
+- **`template_budget`** (default: `2000`): The maximum number of linguistic templates to mine and promote. 
+  - To **disable linguistic templating**, set `template_budget=0`.
+- **`compound_passes`** (default: `2`): The number of iterative encoding passes to identify long multi-word phrases. Each pass doubles the effective reach. 
+  - To **disable compounding**, set `compound_passes=0`.
+- **`bpe_slots`** (default: `3000`): The number of slots reserved for Byte-Pair Encoding (BPE) fallback on residuals. This ensures robust coverage of unknown words.
+
+### Example: Training with custom options
+
+```python
+from greedyphrase import GreedyPhraseTokenizer
+
+t = GreedyPhraseTokenizer(vocab_size=32768)
+t.train(
+    ['data/my_corpus.txt'], 
+    template_budget=500,   # Fewer templates
+    compound_passes=3,     # deeper compounding
+    bpe_slots=1000         # smaller BPE fallback
+)
+```
+
 The C backend (`fast_counter` + `fast_encoder`) handles gigabyte-scale datasets. `fast_counter` uses 12-thread parallel hashing with xxHash; `fast_encoder` uses mmap + contiguous trie pool with speculative prefetch.
 
 ## Quick Start

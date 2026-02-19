@@ -18,7 +18,7 @@ if os.path.exists(VOCAB):
     print(f"Deleted old vocab at {VOCAB}.")
 
 t = GreedyPhraseTokenizer(vocab_size=65536, model_path=VOCAB)
-t.train([DATA], phrase_ratio=0.95)
+t.train([DATA])
 
 # Encode with fast_encoder
 print("\n--- Encoding enwik9 ---")
