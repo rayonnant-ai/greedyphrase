@@ -648,7 +648,7 @@ class GreedyPhraseTokenizer:
                 i += 1
             else:
                 i += 1  # skip invalid IDs
-        return b".".join(res).decode('utf-8', errors='replace')
+        return b"".join(res).decode('utf-8', errors='replace')
 
     def save(self, path):
         with open(path, 'wb') as f:
