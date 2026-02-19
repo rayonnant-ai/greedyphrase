@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""Benchmark GreedyPhrase tokenizer on enwik9."""
+"""Benchmark GreedyPhrase tokenizer on tiny_stories_100m."""
 import os
-import struct
 import time
 from greedyphrase import GreedyPhraseTokenizer
 
-DATA = "data/enwik9"
-VOCAB = "tokenizer/greedyphrase.vocab"
-OUTPUT = "data/enwik9.tokens"
+DATA = "data/tiny_stories_100m"
+VOCAB = "tokenizer/greedyphrase_ts.vocab"
+OUTPUT = "data/tiny_stories_100m.tokens"
+
+if not os.path.exists(DATA):
+    print(f"Data file {DATA} not found.")
+    exit(1)
 
 file_size = os.path.getsize(DATA)
-print(f"enwik9 size: {file_size:,} bytes ({file_size / 1e9:.2f} GB)")
+print(f"tiny_stories_100m size: {file_size:,} bytes ({file_size / 1e6:.2f} MB)")
 
 # Always retrain to pick up algorithm changes
 if os.path.exists(VOCAB):
@@ -21,7 +24,7 @@ t = GreedyPhraseTokenizer(vocab_size=65536, model_path=VOCAB)
 t.train([DATA])
 
 # Encode with fast_encoder
-print("\n--- Encoding enwik9 ---")
+print("\n--- Encoding tiny_stories_100m ---")
 start = time.time()
 t.encode_file(DATA, OUTPUT)
 elapsed = time.time() - start
@@ -32,7 +35,7 @@ num_tokens = token_file_size // 2  # uint16 = 2 bytes per token
 compression_ratio = file_size / num_tokens
 
 print(f"\n{'='*50}")
-print(f"  GreedyPhrase Baseline Benchmark (enwik9)")
+print(f"  GreedyPhrase Benchmark (tiny_stories_100m)")
 print(f"{'='*50}")
 print(f"  Input size:         {file_size:>15,} bytes")
 print(f"  Vocab size:         {t.vocab_size:>15,}")

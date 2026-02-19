@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Benchmark GreedyPhrase tokenizer on enwik9."""
+"""Benchmark GreedyPhrase tokenizer on enwik9 without templates."""
 import os
-import struct
 import time
 from greedyphrase import GreedyPhraseTokenizer
 
 DATA = "data/enwik9"
-VOCAB = "tokenizer/greedyphrase.vocab"
-OUTPUT = "data/enwik9.tokens"
+VOCAB = "tokenizer/greedyphrase_wiki_no_templates.vocab"
+OUTPUT = "data/enwik9_no_templates.tokens"
+
+if not os.path.exists(DATA):
+    print(f"Data file {DATA} not found.")
+    exit(1)
 
 file_size = os.path.getsize(DATA)
 print(f"enwik9 size: {file_size:,} bytes ({file_size / 1e9:.2f} GB)")
@@ -18,7 +21,7 @@ if os.path.exists(VOCAB):
     print(f"Deleted old vocab at {VOCAB}.")
 
 t = GreedyPhraseTokenizer(vocab_size=65536, model_path=VOCAB)
-t.train([DATA])
+t.train([DATA], template_budget=0)
 
 # Encode with fast_encoder
 print("\n--- Encoding enwik9 ---")
@@ -32,7 +35,7 @@ num_tokens = token_file_size // 2  # uint16 = 2 bytes per token
 compression_ratio = file_size / num_tokens
 
 print(f"\n{'='*50}")
-print(f"  GreedyPhrase Baseline Benchmark (enwik9)")
+print(f"  GreedyPhrase Benchmark (enwik9) - No Templates")
 print(f"{'='*50}")
 print(f"  Input size:         {file_size:>15,} bytes")
 print(f"  Vocab size:         {t.vocab_size:>15,}")

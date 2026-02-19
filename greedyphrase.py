@@ -3,9 +3,25 @@ import struct
 import collections
 import tempfile
 import subprocess
-from typing import List, Dict, Tuple
+from dataclasses import dataclass, field
+from typing import List, Dict, Tuple, Optional
 
 import numpy as np
+
+
+SLOT_SENTINEL = 0xFFFF
+TEMPLATE_HASH_PRIME = np.uint64(1000000007)
+
+
+@dataclass
+class TemplateInfo:
+    """Metadata for a single 1-slot template pattern."""
+    vocab_id: int              # assigned ID in the vocab (>= len(base_vocab))
+    length: int                # number of token positions in the template
+    num_slots: int = 1         # always 1 for phase 6
+    frame: List[int] = field(default_factory=list)  # token IDs with SLOT_SENTINEL at slot positions
+    slot_positions: List[int] = field(default_factory=list)  # indices where slots appear
+    frame_bytes: List[bytes] = field(default_factory=list) # bytes of the tokens in the frame (for re-mapping)
 
 
 def train_bpe(segments: List[bytes], num_merges: int) -> List[bytes]:
@@ -128,6 +144,8 @@ def count_token_bigrams(tokens_path, min_freq=100):
     return result
 
 
+
+
 class GreedyPhraseTokenizer:
     """
     A custom greedy dictionary-based tokenizer.
@@ -145,7 +163,8 @@ class GreedyPhraseTokenizer:
         self.vocab: List[bytes] = []
         self.token_to_id: Dict[bytes, int] = {}
         self.trie = {} # Character-based trie for fast greedy matching
-        
+        self.templates: Dict[int, TemplateInfo] = {}  # vocab_id -> TemplateInfo
+
         if os.path.exists(model_path):
             self.load(model_path)
             
@@ -171,115 +190,169 @@ class GreedyPhraseTokenizer:
             )
         return encoder_bin
 
-    def train(self, file_paths: List[str], compound_slots=10000, bpe_slots=3264,
-              compound_passes=2):
+    @staticmethod
+    def _ensure_c_binary(name, extra_flags=None):
+        """Compile a C binary if needed and return its path."""
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        bin_path = os.path.join(base_dir, name)
+        src_path = bin_path + '.c'
+        if not os.path.exists(bin_path) or os.path.getmtime(src_path) > os.path.getmtime(bin_path):
+            print(f"Compiling {name}...", flush=True)
+            cmd = ['gcc', '-O3', '-pthread', '-march=native', '-o', bin_path, src_path]
+            if extra_flags:
+                cmd.extend(extra_flags)
+            subprocess.run(cmd, check=True)
+        return bin_path
+
+    def _ensure_miner(self):
+        """Compile fast_mask and fast_template_miner if needed."""
+        self._ensure_c_binary("fast_mask")
+        self._ensure_c_binary("fast_template_miner")
+
+    def _mine_linguistic_templates(self, target_file, budget=2000, min_freq=100):
+        """Mine templates using the fast C pipeline (Multi-pass)."""
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        data_dir = os.path.join(base_dir, "data")
+        os.makedirs(data_dir, exist_ok=True)
+        
+        masked_words = os.path.join(data_dir, "masked_words.bin")
+        mask_vocab = os.path.join(data_dir, "mask_vocab.bin")
+        winning_templates = os.path.join(data_dir, "winning_templates.txt")
+        
+        self._ensure_miner()
+        
+        print(f"  Step 1: Masking {target_file}...", flush=True)
+        mask_bin = os.path.join(base_dir, "fast_mask")
+        subprocess.run([mask_bin, target_file, masked_words, mask_vocab], check=True)
+        
+        print(f"  Step 2: Mining n-grams from masked stream (Multi-pass)...", flush=True)
+        miner_bin = os.path.join(base_dir, "fast_template_miner")
+        
+        # Split mining into 3 passes to avoid OOM with large thread count
+        # Pass 1: 5..8, Pass 2: 9..12, Pass 3: 13..15
+        passes = [(5, 8), (9, 12), (13, 15)]
+        all_templates = []
+        
+        for i, (min_n, max_n) in enumerate(passes):
+            print(f"    Pass {i+1}: Mining L={min_n}..{max_n}...", flush=True)
+            raw_templates_part = os.path.join(data_dir, f"raw_templates_p{i+1}.txt")
+            if os.path.exists(raw_templates_part): os.remove(raw_templates_part)
+            
+            subprocess.run([
+                miner_bin, masked_words, mask_vocab, raw_templates_part, 
+                str(min_freq), str(min_n), str(max_n), "12"
+            ], check=True)
+            
+            # Load and merge results immediately to save disk/memory
+            with open(raw_templates_part, 'r', encoding='latin-1') as f:
+                for line in f:
+                    parts = line.strip().split(' ')
+                    if len(parts) < 2: continue
+                    try:
+                        count = int(parts[0])
+                        tokens = parts[1:]
+                        num_slots = tokens.count(';?')
+                        length = len(tokens)
+                        saved = length - (1 + num_slots)
+                        if saved <= 0: continue
+                        score = count * saved
+                        all_templates.append((score, count, tokens))
+                    except ValueError: continue
+            
+            os.remove(raw_templates_part) # Cleanup
+        
+        print(f"  Step 3: Promoting top {budget} templates from {len(all_templates)} candidates...", flush=True)
+        all_templates.sort(key=lambda x: -x[0])
+        winners = all_templates[:budget]
+        
+        # Save winners for inspection
+        with open(winning_templates, 'w', encoding='latin-1') as f:
+            for score, count, tokens in winners:
+                f.write(f"{count} {' '.join(tokens)}\n")
+        
+        return winners
+
+    def train(self, file_paths: List[str], max_vocab_size=65536, 
+              compound_passes=2, bpe_slots=3000, template_budget=2000):
         """
-        Trains the tokenizer vocabulary from a list of files.
-        Multi-pass compound approach:
-          Pass 1: Count primitive n-grams (up to 7 atoms), build vocab, encode
-          Pass 2..N: Count bigrams of previous pass's tokens to form compound
-                     phrases (each pass doubles max reach). Compound budget is
-                     split evenly across compounding passes.
-        Then BPE on residuals from the final pass.
+        Trains the tokenizer vocabulary from a list of files using "Free Market" selection.
         """
-        print(f"Training tokenizer on {len(file_paths)} files using fast_counter...", flush=True)
+        print(f"Training tokenizer on {len(file_paths)} files (Free Market Mode)...", flush=True)
+        target_file = file_paths[0]
+
+        # ── New Step 0: Mine Linguistic Templates ──
+        winning_templates_data = []
+        if template_budget > 0:
+            print("Mining linguistic templates (Phase 7C)...", flush=True)
+            winning_templates_data = self._mine_linguistic_templates(target_file, budget=template_budget)
+        else:
+            print("Skipping linguistic template mining (budget=0)...", flush=True)
 
         # Determine path to fast_counter binary
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        counter_bin = os.path.join(base_dir, "fast_counter")
-
-        if not os.path.exists(counter_bin):
-            print("Compiling fast_counter...", flush=True)
-            try:
-                subprocess.run(
-                    ["gcc", "-O3", "-o", counter_bin, os.path.join(base_dir, "fast_counter.c")],
-                    check=True
-                )
-            except Exception as e:
-                print(f"Failed to compile fast_counter: {e}", flush=True)
-                return
+        counter_bin = self._ensure_c_binary("fast_counter")
 
         counts_file = os.path.join(base_dir, "tokenizer", "counts.txt")
         if os.path.exists(counts_file):
             os.remove(counts_file)
 
-        target_file = file_paths[0]
-
         print(f"Running fast_counter on {target_file}...", flush=True)
-        try:
-            subprocess.run([counter_bin, target_file], check=True)
-        except subprocess.CalledProcessError as e:
-            print(f"fast_counter failed: {e}", flush=True)
-            return
+        subprocess.run([counter_bin, target_file], check=True)
 
         # Read back the counts
         print("Loading counts from C backend...", flush=True)
-
         atom_freqs = collections.Counter()
         phrase_freqs = collections.Counter()
-
         current_section = None
-
         with open(counts_file, 'r', encoding='latin-1') as f:
             for line in f:
                 line = line.strip()
-                if line == "ATOMS":
-                    current_section = "atoms"
-                    continue
-                elif line in ("BIGRAMS", "TRIGRAMS", "PHRASES"):
-                    current_section = "phrases"
-                    continue
+                if line == "ATOMS": current_section = "atoms"
+                elif line in ("BIGRAMS", "TRIGRAMS", "PHRASES"): current_section = "phrases"
+                else:
+                    parts = line.split(' ')
+                    if len(parts) < 2: continue
+                    try:
+                        count = int(parts[0])
+                        token = " ".join(parts[1:]).replace('\\n', '\n').replace('\\r', '\r')
+                        if current_section == "atoms": atom_freqs[token] += count
+                        elif current_section == "phrases": phrase_freqs[token] += count
+                    except ValueError: continue
 
-                parts = line.split(' ')
-                if len(parts) < 2: continue
+        # ── Candidate Pool ──
+        # type 0: Token (bytes), type 1: Template (TemplateInfo)
+        candidate_pool = []
+        
+        # Add mined linguistic templates to pool
+        template_candidates = []
+        for score, count, words in winning_templates_data:
+            # We need to store the word list to reconstruct the TemplateInfo later
+            candidate_pool.append((count, 1, words))
+            
+            # Also add literal words to pool with high frequency to ensure they exist
+            for w in words:
+                if w != ';?':
+                    candidate_pool.append((1e12, 0, w.encode('latin-1')))
 
-                try:
-                    count = int(parts[0])
-                    raw_token = " ".join(parts[1:])
-                    token = raw_token.replace('\\\\', '\\').replace('\\n', '\n').replace('\\r', '\r')
-
-                    if current_section == "atoms":
-                        atom_freqs[token] += count
-                    elif current_section == "phrases":
-                        phrase_freqs[token] += count
-                except ValueError:
-                    continue
-
-        print(f"Loaded {len(atom_freqs)} atoms and {len(phrase_freqs)} phrases.", flush=True)
-
-        # ── Budget split ──
-        reserved_tokens = [b"<pad>", b"<unk>", b"<s>", b"</s>"]
-        reserved_bytes = [bytes([i]) for i in range(256)]
-        total_reserved = len(reserved_tokens) + len(reserved_bytes)  # 260
-        remaining_slots = self.vocab_size - total_reserved  # 65276
-
-        num_primitive_slots = remaining_slots - compound_slots - bpe_slots
-        slots_per_pass = compound_slots // compound_passes
-        print(f"Budget: {num_primitive_slots} primitive + {compound_slots} compound "
-              f"({slots_per_pass}x{compound_passes} passes) + {bpe_slots} BPE = {remaining_slots}",
-              flush=True)
-
-        # ── Step A: Select primitive phrases ──
-        print("Selecting primitive phrases...", flush=True)
-
+        # Collect Primitives from fast_counter
         all_phrase_freqs = collections.Counter()
         for atom, freq in atom_freqs.items():
             b = atom.encode('latin-1')
-            if len(b) > 1:
-                all_phrase_freqs[b] = freq
+            if len(b) > 1: all_phrase_freqs[b] = freq
         for phrase, freq in phrase_freqs.items():
             b = phrase.encode('latin-1')
             all_phrase_freqs[b] += freq
 
-        top_phrases = all_phrase_freqs.most_common(num_primitive_slots)
-        primitive_entries = [b for b, _ in top_phrases]
+        top_phrases = all_phrase_freqs.most_common(60000)
+        for b, freq in top_phrases:
+            candidate_pool.append((freq, 0, b))
 
-        print(f"  Selected {len(primitive_entries)} primitive phrases.", flush=True)
+        reserved_tokens = [b"<pad>", b"<unk>", b"<s>", b"</s>"]
+        reserved_bytes = [bytes([i]) for i in range(256)]
+        bootstrap_primitives = [b for b, _ in top_phrases[:50000]]
+        current_vocab = reserved_tokens + reserved_bytes + bootstrap_primitives
 
-        # ── Iterative compound passes ──
-        current_vocab = reserved_tokens + reserved_bytes + primitive_entries
-        all_compound_entries = []
-
+        # Step B: Collect Compounds
         tmp_vocab_fd, tmp_vocab_path = tempfile.mkstemp(suffix='.vocab')
         os.close(tmp_vocab_fd)
         tmp_tokens_fd, tmp_tokens_path = tempfile.mkstemp(suffix='.tokens')
@@ -287,112 +360,117 @@ class GreedyPhraseTokenizer:
 
         try:
             encoder_bin = self._ensure_fast_encoder()
-
             for pass_num in range(1, compound_passes + 1):
                 print(f"Pass {pass_num}: encoding with {len(current_vocab)} tokens...", flush=True)
                 self._save_vocab(current_vocab, tmp_vocab_path)
-                subprocess.run(
-                    [encoder_bin, tmp_vocab_path, target_file, tmp_tokens_path],
-                    check=True
-                )
-
-                token_data = open(tmp_tokens_path, 'rb').read()
-                num_tokens = len(token_data) // 2
-                print(f"  Pass {pass_num} produced {num_tokens:,} tokens.", flush=True)
-
-                # Count token bigrams — relax min_freq for later passes
-                min_freq = max(50, 125 - pass_num * 25)
-                print(f"  Counting token bigrams (min_freq={min_freq})...", flush=True)
-                bigram_counts = count_token_bigrams(tmp_tokens_path, min_freq=min_freq)
-                print(f"  Found {len(bigram_counts):,} bigram types.", flush=True)
-
-                # Build compound phrases from bigrams
-                compound_candidates = []
-                for (id_a, id_b), freq in bigram_counts.items():
-                    if id_a >= len(current_vocab) or id_b >= len(current_vocab):
-                        continue
-                    compound = current_vocab[id_a] + current_vocab[id_b]
-                    if len(compound) <= 1:
-                        continue
-                    score = freq * len(compound)
-                    compound_candidates.append((score, compound))
-
-                compound_candidates.sort(reverse=True)
-
-                # Dedup against everything already in vocab
-                existing = set(current_vocab)
+                subprocess.run([encoder_bin, tmp_vocab_path, target_file, tmp_tokens_path], check=True)
+                bigram_counts = count_token_bigrams(tmp_tokens_path, min_freq=max(50, 125 - pass_num * 25))
                 new_compounds = []
-                for _, compound in compound_candidates:
-                    if compound in existing:
-                        continue
-                    existing.add(compound)
-                    new_compounds.append(compound)
-                    if len(new_compounds) >= slots_per_pass:
-                        break
+                existing = set(current_vocab)
+                sorted_bigrams = sorted(bigram_counts.items(), key=lambda x: -x[1])
+                for (id_a, id_b), freq in sorted_bigrams:
+                    if id_a >= len(current_vocab) or id_b >= len(current_vocab): continue
+                    compound = current_vocab[id_a] + current_vocab[id_b]
+                    if len(compound) > 1 and compound not in existing:
+                        candidate_pool.append((freq, 0, compound))
+                        new_compounds.append(compound)
+                        existing.add(compound)
+                        if len(new_compounds) >= 10000: break
+                current_vocab.extend(new_compounds)
 
-                print(f"  Selected {len(new_compounds)} compound phrases (pass {pass_num}).", flush=True)
-                all_compound_entries.extend(new_compounds)
-                current_vocab = reserved_tokens + reserved_bytes + primitive_entries + all_compound_entries
-
-            # ── Final encode to collect residuals ──
-            print(f"Final encode: {len(current_vocab)} tokens...", flush=True)
+            # Step C: BPE
+            print(f"Final encode for BPE...", flush=True)
             self._save_vocab(current_vocab, tmp_vocab_path)
-            subprocess.run(
-                [encoder_bin, tmp_vocab_path, target_file, tmp_tokens_path],
-                check=True
-            )
-
+            subprocess.run([encoder_bin, tmp_vocab_path, target_file, tmp_tokens_path], check=True)
             token_data = open(tmp_tokens_path, 'rb').read()
-            num_tokens = len(token_data) // 2
-            print(f"  Final encode produced {num_tokens:,} tokens.", flush=True)
-
-            # Collect residuals
             residuals = []
             current_run = bytearray()
-
             for offset in range(0, len(token_data), 2):
                 tid = int.from_bytes(token_data[offset:offset+2], 'little')
-                if 4 <= tid <= 259:
-                    current_run.append(tid - 4)
+                if 4 <= tid <= 259: current_run.append(tid - 4)
                 else:
-                    if len(current_run) > 1:
-                        residuals.append(bytes(current_run))
+                    if len(current_run) > 1: residuals.append(bytes(current_run))
                     current_run = bytearray()
-
-            if len(current_run) > 1:
-                residuals.append(bytes(current_run))
-
-            print(f"  Collected {len(residuals):,} residual segments "
-                  f"({sum(len(r) for r in residuals):,} bytes total).", flush=True)
+            if len(current_run) > 1: residuals.append(bytes(current_run))
+            bpe_tokens = train_bpe(residuals, bpe_slots)
 
         finally:
             os.unlink(tmp_vocab_path)
             os.unlink(tmp_tokens_path)
 
-        # ── Train BPE on residuals ──
-        print(f"Training BPE on residuals ({bpe_slots} merges)...", flush=True)
-        bpe_tokens = train_bpe(residuals, bpe_slots)
+        # ── Step E: The Grand Cull ──
+        candidate_pool.sort(key=lambda x: -x[0])
+        total_reserved = len(reserved_tokens) + len(reserved_bytes)
+        # We need to account for both winning tokens and winning templates
+        # market_budget = max_vocab_size - total_reserved - len(bpe_tokens)
+        
+        # Split winners
+        winning_tokens = []
+        winning_templates_data = [] # List of word lists
+        
+        seen_tokens = set(reserved_tokens + reserved_bytes)
+        
+        # We iterate and pick until we hit max_vocab_size
+        current_vocab_size = total_reserved + len(bpe_tokens)
+        
+        for freq, type, data in candidate_pool:
+            if current_vocab_size >= max_vocab_size:
+                break
+                
+            if type == 0: # Token
+                if data not in seen_tokens:
+                    winning_tokens.append(data)
+                    seen_tokens.add(data)
+                    current_vocab_size += 1
+            elif type == 1: # Template
+                winning_templates_data.append(data)
+                current_vocab_size += 1
+        
+        # Add BPE tokens (ensuring they fit)
+        # In practice, BPE is small, but let's be robust
+        for t in bpe_tokens:
+            if t not in seen_tokens:
+                if len(winning_tokens) + len(reserved_tokens) + len(reserved_bytes) + len(winning_templates_data) < max_vocab_size:
+                    winning_tokens.append(t)
+                    seen_tokens.add(t)
+                else:
+                    # If we are over, we have to drop something. 
+                    # Usually BPE is kept, so we might drop the last winners.
+                    pass
 
-        existing = set(current_vocab)
-        bpe_tokens = [t for t in bpe_tokens if t not in existing and len(t) < 4096]
-        print(f"  Got {len(bpe_tokens)} unique BPE tokens.", flush=True)
-
-        # ── Build final vocab ──
-        self.vocab = current_vocab + bpe_tokens
-
-        if len(self.vocab) > self.vocab_size:
-            self.vocab = self.vocab[:self.vocab_size]
-
+        self.vocab = reserved_tokens + reserved_bytes + winning_tokens
         self.token_to_id = {token: i for i, token in enumerate(self.vocab)}
-        self._build_trie()
 
-        print(f"Vocab size: {len(self.vocab)}", flush=True)
-        print(f"  - Special: {len(reserved_tokens)}", flush=True)
-        print(f"  - Bytes: {len(reserved_bytes)}", flush=True)
-        print(f"  - Primitives: {len(primitive_entries)}", flush=True)
-        print(f"  - Compounds: {len(all_compound_entries)} ({compound_passes} passes)", flush=True)
-        print(f"  - BPE: {len(bpe_tokens)}", flush=True)
-        self.save(self.model_path)
+        # Map winning templates to final IDs
+        self.templates = {}
+        base_id = len(self.vocab)
+        valid_template_count = 0
+        
+        for words in winning_templates_data:
+            frame = []
+            slot_positions = []
+            valid = True
+            for i, w in enumerate(words):
+                if w == ';?':
+                    frame.append(SLOT_SENTINEL)
+                    slot_positions.append(i)
+                else:
+                    b = w.encode('latin-1')
+                    if b in self.token_to_id:
+                        frame.append(self.token_to_id[b])
+                    else:
+                        valid = False
+                        break
+            if valid:
+                vid = base_id + valid_template_count
+                self.templates[vid] = TemplateInfo(
+                    vocab_id=vid,
+                    length=len(frame),
+                    num_slots=len(slot_positions),
+                    frame=frame,
+                    slot_positions=slot_positions
+                )
+                valid_template_count += 1
 
     def _build_trie(self):
         """
@@ -406,6 +484,69 @@ class GreedyPhraseTokenizer:
                     node[byte] = {}
                 node = node[byte]
             node['__id__'] = i
+
+    def _build_template_index(self):
+        """Group templates by first literal token ID for O(1) lookup.
+
+        Each bucket is sorted by template length descending (longest-match-first).
+        """
+        self.template_index = {}
+        for tmpl in self.templates.values():
+            first_tok = tmpl.frame[0]  # slot position 0 excluded, so always literal
+            if first_tok not in self.template_index:
+                self.template_index[first_tok] = []
+            self.template_index[first_tok].append(tmpl)
+        # Sort each bucket: longest templates first
+        for bucket in self.template_index.values():
+            bucket.sort(key=lambda t: -t.length)
+
+    def _apply_templates(self, tokens: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Greedy left-to-right template matching on a token stream.
+
+        Returns (new_tokens: uint16[], meta: uint8[]) where meta values are:
+          0 = normal token, 1 = template ID, 2 = fill token.
+        """
+        n = len(tokens)
+        out_tokens = []
+        out_meta = []
+        pos = 0
+        matches = 0
+
+        while pos < n:
+            matched = False
+            candidates = self.template_index.get(int(tokens[pos]), [])
+            for tmpl in candidates:  # longest first
+                L = tmpl.length
+                if pos + L > n:
+                    continue
+                # Check all literal positions match
+                ok = True
+                for j in range(L):
+                    if tmpl.frame[j] == SLOT_SENTINEL:
+                        continue
+                    if int(tokens[pos + j]) != tmpl.frame[j]:
+                        ok = False
+                        break
+                if ok:
+                    out_tokens.append(tmpl.vocab_id)
+                    out_meta.append(1)  # template
+                    for sp in tmpl.slot_positions:
+                        out_tokens.append(int(tokens[pos + sp]))
+                        out_meta.append(2)  # fill
+                    pos += L
+                    matched = True
+                    matches += 1
+                    break
+            if not matched:
+                out_tokens.append(int(tokens[pos]))
+                out_meta.append(0)  # normal
+                pos += 1
+
+        print(f"  Templates matched {matches:,} times, "
+              f"tokens {n:,} -> {len(out_tokens):,} "
+              f"(saved {n - len(out_tokens):,})", flush=True)
+        return (np.array(out_tokens, dtype=np.uint16),
+                np.array(out_meta, dtype=np.uint8))
 
     def encode(self, text: str) -> List[int]:
         """
@@ -450,54 +591,85 @@ class GreedyPhraseTokenizer:
                 
         return ids
 
-    def encode_file(self, input_path: str, output_path: str):
+    def encode_file(self, input_path: str, output_path: str,
+                    output_meta_path: Optional[str] = None):
         """
         Encodes a large file using the C fast_encoder binary.
+        If templates are loaded, applies template matching as a post-pass.
+        Optionally writes a uint8 meta array (0=normal, 1=template, 2=fill).
         """
         print(f"Encoding {input_path} to {output_path} using fast_encoder...", flush=True)
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        encoder_bin = os.path.join(base_dir, "fast_encoder")
-        
-        if not os.path.exists(encoder_bin):
-            print("Compiling fast_encoder...", flush=True)
-            try:
-                subprocess.run(
-                    ["gcc", "-O3", "-o", encoder_bin, os.path.join(base_dir, "fast_encoder.c")],
-                    check=True
-                )
-            except Exception as e:
-                print(f"Failed to compile fast_encoder: {e}", flush=True)
-                raise
+        encoder_bin = self._ensure_fast_encoder()
 
         # Ensure vocab is saved for C to read
         if not os.path.exists(self.model_path):
             self.save(self.model_path)
-            
+
         try:
             subprocess.run([encoder_bin, self.model_path, input_path, output_path], check=True)
         except subprocess.CalledProcessError as e:
             print(f"fast_encoder failed: {e}", flush=True)
             raise
 
+        # Apply templates as a post-pass if we have any
+        if self.templates:
+            template_bin = self._ensure_fast_template()
+            tmpl_path = self.model_path.replace('.vocab', '.templates') if '.vocab' in self.model_path else self.model_path + '.templates'
+            if not os.path.exists(tmpl_path):
+                self.save(self.model_path)
+            cmd = [template_bin, tmpl_path, output_path, output_path]
+            if output_meta_path:
+                cmd.append(output_meta_path)
+            subprocess.run(cmd, check=True)
+
     def decode(self, ids: List[int]) -> str:
         res = []
-        for i in ids:
-            if 0 <= i < len(self.vocab):
-                res.append(self.vocab[i])
+        i = 0
+        while i < len(ids):
+            tid = ids[i]
+            if tid in self.templates:
+                tmpl = self.templates[tid]
+                # Consume next num_slots tokens as fills
+                fills = ids[i + 1 : i + 1 + tmpl.num_slots]
+                # Reconstruct by substituting fills into the frame
+                for j, frame_tid in enumerate(tmpl.frame):
+                    if frame_tid == SLOT_SENTINEL:
+                        # Find which slot this is
+                        slot_idx = tmpl.slot_positions.index(j)
+                        fill_tid = fills[slot_idx] if slot_idx < len(fills) else 0
+                        if 0 <= fill_tid < len(self.vocab):
+                            res.append(self.vocab[fill_tid])
+                    else:
+                        if 0 <= frame_tid < len(self.vocab):
+                            res.append(self.vocab[frame_tid])
+                i += 1 + tmpl.num_slots
+            elif 0 <= tid < len(self.vocab):
+                res.append(self.vocab[tid])
+                i += 1
             else:
-                res.append(b"") # Ignore invalid IDs
+                i += 1  # skip invalid IDs
         return b"".join(res).decode('utf-8', errors='replace')
 
     def save(self, path):
         with open(path, 'wb') as f:
-            # Simple serialization: newline separated bytes
-            # Escape newlines in content for storage if needed, but for simplicity
-            # we'll just pickle or use a length-prefixed format.
-            # Let's use length-prefixed for safety.
             f.write(struct.pack('>I', len(self.vocab)))
             for token in self.vocab:
                 f.write(struct.pack('>I', len(token)))
                 f.write(token)
+
+        # Save templates companion file
+        if self.templates:
+            tmpl_path = path.replace('.vocab', '.templates') if '.vocab' in path else path + '.templates'
+            sorted_tmpls = sorted(self.templates.values(), key=lambda t: t.vocab_id)
+            base_id = sorted_tmpls[0].vocab_id if sorted_tmpls else 0
+            with open(tmpl_path, 'wb') as f:
+                f.write(struct.pack('>I', len(sorted_tmpls)))
+                f.write(struct.pack('>I', base_id))
+                for tmpl in sorted_tmpls:
+                    f.write(struct.pack('BB', tmpl.length, tmpl.num_slots))
+                    for tid in tmpl.frame:
+                        f.write(struct.pack('>H', tid))
+            print(f"Saved {len(sorted_tmpls)} templates to {tmpl_path}", flush=True)
                 
     def load(self, path):
         with open(path, 'rb') as f:
@@ -507,9 +679,45 @@ class GreedyPhraseTokenizer:
                 token_len = struct.unpack('>I', f.read(4))[0]
                 token = f.read(token_len)
                 self.vocab.append(token)
-        
+
         self.token_to_id = {token: i for i, token in enumerate(self.vocab)}
         self._build_trie()
+
+        # Load templates companion file if it exists
+        tmpl_path = path.replace('.vocab', '.templates') if '.vocab' in path else path + '.templates'
+        self.templates = {}
+        self.template_index = {}
+        if os.path.exists(tmpl_path):
+            with open(tmpl_path, 'rb') as f:
+                num_templates = struct.unpack('>I', f.read(4))[0]
+                base_id = struct.unpack('>I', f.read(4))[0]
+                for i in range(num_templates):
+                    length, num_slots = struct.unpack('BB', f.read(2))
+                    frame = [struct.unpack('>H', f.read(2))[0] for _ in range(length)]
+                    slot_positions = [j for j, tid in enumerate(frame) if tid == SLOT_SENTINEL]
+                    vid = base_id + i
+                    self.templates[vid] = TemplateInfo(
+                        vocab_id=vid,
+                        length=length,
+                        num_slots=num_slots,
+                        frame=frame,
+                        slot_positions=slot_positions,
+                    )
+            if self.templates:
+                self._build_template_index()
+            print(f"Loaded {len(self.templates)} templates from {tmpl_path}", flush=True)
+            
+    def _ensure_fast_template(self):
+        """Compile fast_template if needed and return its path."""
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        template_bin = os.path.join(base_dir, "fast_template")
+        if not os.path.exists(template_bin):
+            print("Compiling fast_template...", flush=True)
+            subprocess.run(
+                ["gcc", "-O3", "-o", template_bin, os.path.join(base_dir, "fast_template.c")],
+                check=True
+            )
+        return template_bin
 
 if __name__ == "__main__":
     # Demo
@@ -521,7 +729,7 @@ if __name__ == "__main__":
         f.write("guest appearance " * 20)
         f.write("Hello world. " * 10)
     
-    t.train(["tokenizer/train_dummy.txt"], compound_slots=100, bpe_slots=100)
+    t.train(["tokenizer/train_dummy.txt"], bpe_slots=100)
     
     text = "The guest appearance was quick."
     tokens = t.encode(text)
