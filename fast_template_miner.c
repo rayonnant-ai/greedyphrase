@@ -12,8 +12,9 @@
 #include <time.h>
 #include <pthread.h>
 
-#define SENTINEL_ID 0xFFFFFFFFu
-#define LINE_SEP    0xFFFFFFFEu
+#define LINE_SEP         0xFFFFFFFEu
+#define SENTINEL_MIN     0xFFFFFF00u
+#define IS_SENTINEL(x)   ((x) >= SENTINEL_MIN && (x) < LINE_SEP)
 #define MIN_WINDOW      5
 #define MAX_WINDOW      15
 #define MIN_LITERAL_LEN 15
@@ -138,13 +139,13 @@ static void *mine_thread(void *arg) {
             int total_lit = 0;
             for (int L = 1; L <= g_max_n && i + L <= llen; L++) {
                 uint32_t wid = line[i + L - 1];
-                if (wid != SENTINEL_ID) {
+                if (!IS_SENTINEL(wid)) {
                     total_lit += g_vocab_lens[wid];
                 }
                 if (L >= g_min_n && total_lit >= MIN_LITERAL_LEN) {
                     /* Only keep if it has at least one sentinel */
                     int has_sentinel = 0;
-                    for (int k = 0; k < L; k++) if (line[i + k] == SENTINEL_ID) { has_sentinel = 1; break; }
+                    for (int k = 0; k < L; k++) if (IS_SENTINEL(line[i + k])) { has_sentinel = 1; break; }
                     
                     if (has_sentinel) {
                         uint64_t h = XXH3_64bits(line + i, L * sizeof(uint32_t));
@@ -243,7 +244,7 @@ int main(int argc, char **argv) {
             if (nd->count >= (uint32_t)min_freq) {
                 fprintf(out, "%u ", nd->count);
                 for (int j = 0; j < nd->n_len; j++) {
-                    if (nd->ids[j] == SENTINEL_ID) {
+                    if (IS_SENTINEL(nd->ids[j])) {
                         fprintf(out, ";?");
                     } else {
                         uint32_t wid = nd->ids[j];

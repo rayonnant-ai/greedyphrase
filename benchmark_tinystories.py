@@ -92,9 +92,18 @@ compile_binaries()
 results = []
 
 r = run_config(
-    "7-gram + compound",
+    "Phase8d no templates",
     count_input=DATA,
     encode_input=DATA,
+    template_budget=0,
+)
+results.append(r)
+
+r = run_config(
+    "Phase8d + templates",
+    count_input=DATA,
+    encode_input=DATA,
+    template_budget=2000,
 )
 results.append(r)
 

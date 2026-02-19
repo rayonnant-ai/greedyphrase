@@ -255,6 +255,8 @@ class GreedyPhraseTokenizer:
                         length = len(tokens)
                         saved = length - (1 + num_slots)
                         if saved <= 0: continue
+                        # 70/30 density filter: reject templates with >30% slots
+                        if num_slots / length > 0.30: continue
                         score = count * saved
                         all_templates.append((score, count, tokens))
                     except ValueError: continue
@@ -595,8 +597,8 @@ class GreedyPhraseTokenizer:
                     output_meta_path: Optional[str] = None):
         """
         Encodes a large file using the C fast_encoder binary.
-        If templates are loaded, applies template matching as a post-pass.
-        Optionally writes a uint8 meta array (0=normal, 1=template, 2=fill).
+        If word-level templates exist, passes them to fast_encoder for
+        integrated word-level template matching during encoding.
         """
         print(f"Encoding {input_path} to {output_path} using fast_encoder...", flush=True)
         encoder_bin = self._ensure_fast_encoder()
@@ -605,22 +607,20 @@ class GreedyPhraseTokenizer:
         if not os.path.exists(self.model_path):
             self.save(self.model_path)
 
+        # Build fast_encoder command — pass word templates if available
+        cmd = [encoder_bin, self.model_path, input_path, output_path]
+        if self.templates:
+            wt_path = self.model_path.replace('.vocab', '.wtemplates') if '.vocab' in self.model_path else self.model_path + '.wtemplates'
+            if not os.path.exists(wt_path):
+                self._save_word_templates(self.model_path)
+            if os.path.exists(wt_path):
+                cmd.append(wt_path)
+
         try:
-            subprocess.run([encoder_bin, self.model_path, input_path, output_path], check=True)
+            subprocess.run(cmd, check=True)
         except subprocess.CalledProcessError as e:
             print(f"fast_encoder failed: {e}", flush=True)
             raise
-
-        # Apply templates as a post-pass if we have any
-        if self.templates:
-            template_bin = self._ensure_fast_template()
-            tmpl_path = self.model_path.replace('.vocab', '.templates') if '.vocab' in self.model_path else self.model_path + '.templates'
-            if not os.path.exists(tmpl_path):
-                self.save(self.model_path)
-            cmd = [template_bin, tmpl_path, output_path, output_path]
-            if output_meta_path:
-                cmd.append(output_meta_path)
-            subprocess.run(cmd, check=True)
 
     def decode(self, ids: List[int]) -> str:
         res = []
@@ -657,7 +657,7 @@ class GreedyPhraseTokenizer:
                 f.write(struct.pack('>I', len(token)))
                 f.write(token)
 
-        # Save templates companion file
+        # Save templates companion file (token-ID format)
         if self.templates:
             tmpl_path = path.replace('.vocab', '.templates') if '.vocab' in path else path + '.templates'
             sorted_tmpls = sorted(self.templates.values(), key=lambda t: t.vocab_id)
@@ -670,6 +670,42 @@ class GreedyPhraseTokenizer:
                     for tid in tmpl.frame:
                         f.write(struct.pack('>H', tid))
             print(f"Saved {len(sorted_tmpls)} templates to {tmpl_path}", flush=True)
+
+        # Save word-level templates for fast_encoder (word-string format)
+        if self.templates:
+            self._save_word_templates(path)
+
+    def _save_word_templates(self, vocab_path):
+        """Save templates in fast_encoder's word-template binary format.
+
+        Format: [uint32 BE: count][uint32 BE: base_id]
+        Per template: [uint8 num_words][uint8 slot_pos]
+          For each word (skip slot_pos): [uint16 BE: len][bytes: word]
+        Only single-slot templates are saved (fast_encoder limitation).
+        """
+        wt_path = vocab_path.replace('.vocab', '.wtemplates') if '.vocab' in vocab_path else vocab_path + '.wtemplates'
+        sorted_tmpls = sorted(self.templates.values(), key=lambda t: t.vocab_id)
+
+        # Filter to single-slot templates only
+        single_slot = [t for t in sorted_tmpls if t.num_slots == 1]
+        if not single_slot:
+            return
+
+        base_id = single_slot[0].vocab_id
+        with open(wt_path, 'wb') as f:
+            f.write(struct.pack('>I', len(single_slot)))
+            f.write(struct.pack('>I', base_id))
+            for tmpl in single_slot:
+                slot_pos = tmpl.slot_positions[0]
+                f.write(struct.pack('BB', tmpl.length, slot_pos))
+                for j in range(tmpl.length):
+                    if j == slot_pos:
+                        continue  # slot position: no data
+                    tid = tmpl.frame[j]
+                    word = self.vocab[tid] if tid < len(self.vocab) else b''
+                    f.write(struct.pack('>H', len(word)))
+                    f.write(word)
+        print(f"Saved {len(single_slot)} word-templates to {wt_path}", flush=True)
                 
     def load(self, path):
         with open(path, 'rb') as f:

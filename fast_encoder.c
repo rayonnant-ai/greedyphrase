@@ -98,7 +98,7 @@ static int load_vocab(const char *path) {
 
 /* --- Word-level template structures --- */
 
-#define MAX_TMPL_WORDS 12
+#define MAX_TMPL_WORDS 16
 #define WT_HASH_BITS   16
 #define WT_HASH_SIZE   (1 << WT_HASH_BITS)
 #define WT_HASH_MASK   (WT_HASH_SIZE - 1)
