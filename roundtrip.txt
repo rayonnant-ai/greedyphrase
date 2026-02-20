@@ -1,0 +1,500 @@
+===BEFORE===
+Once upon a time there was a little boy named Ben. Ben loved to explore the world around him. He saw many amazing things, like beautiful vases that were on display in a store. One day, Ben was walking through the store when he came across a very special vase. When Ben saw it he was amazed!  
+He said, “Wow, that is a really amazing vase! Can I buy it?” 
+The shopkeeper smiled and said, “Of course you can. You can take it home and show all your friends how amazing it is!”
+So Ben took the vase home and he was so proud of it! He called his friends over and showed them the amazing vase. All his friends thought the vase was beautiful and couldn't believe how lucky Ben was. 
+And that's how Ben found an amazing vase in the store!
+
+===EVENTS===
+@Ben:person(little,boy) @Store:place(store) @Shopkeeper:person(shopkeeper) @Vase:object(vase)
+Ben love explore world Ben
+Ben see thing
+Ben walk Store
+Ben come Vase
+Ben see Vase
+Ben be amazed
+Ben say
+Shopkeeper smile
+Shopkeeper say
+Ben show friend
+Ben take Vase
+Ben call friend
+Ben show Ben Vase
+Ben believe
+Ben find Vase
+
+===AFTER===
+Ben loved explore world Ben. Ben saw thing. Ben walked Store. Ben came Vase. Ben saw Vase. Once upon a time, there was a little boy named Ben. Ben was amazed. Ben said, "." Shopkeeper smiled. Shopkeeper said, "." Ben showed friend. Ben took Vase. Ben called friend. Ben showed Ben Vase. Ben believed. Ben found Vase.
+
+===BEFORE===
+Once upon a time, there was a reliable otter named Ollie. He lived in a river with his family. They all loved to play and swim together.
+One day, Ollie's mom said, "Ollie, hurry and get some fish for dinner!" Ollie swam fast to catch fish. He saw his friend, the duck. "Hi, Ollie!" said the duck. "Hi, duck!" said Ollie. "I need to hurry and catch fish for my family."
+While Ollie was catching fish, he found a big shiny stone. He thought, "This is not a fish, but it is so pretty!" Ollie took the shiny stone home to show his family. They all looked at the shiny stone and smiled. The shiny stone made everyone happy, and they forgot about the fish for dinner.
+
+===EVENTS===
+@Ollie:person(reliable,otter) @Duck:animal(duck) @Fish:animal(fish)
+Fish love play
+Fish swim
+Fish get Fish for dinner
+Ollie swam
+Ollie say
+Ollie catch Fish for family
+Ollie catch Fish
+Ollie take home
+Ollie look at stone
+Ollie smile
+Ollie forget Fish
+
+===AFTER===
+Fish loved play. Fish swam. Fish got Fish for dinner. Ollie swam. Ollie said, "." Ollie caught Fish for family. Ollie caught Fish. Ollie took home. Ollie looked at at stone. Ollie smiled. Ollie forgot Fish.
+
+===BEFORE===
+One day, a little boy named Tim went to the park. He saw a big tiger. The tiger was not mean, but very easy to play with. Tim and the tiger played all day. They had lots of fun.
+Then, something unexpected happened. The tiger started to shake. Tim was scared. He did not know what was going on. But then, the tiger turned into a nice dog. Tim was very surprised.
+Tim and the dog played together now. They were very happy. The dog was easy to play with too. At the end of the day, Tim went home with his new friend.
+
+===EVENTS===
+@Tim:person(character) @Park:place(park) @Tiger:animal(tiger) @Dog:animal(dog)
+Tiger be mean
+Tim play
+Tim have lot
+Tiger start shake
+Tim be scared
+Tiger turn Dog
+Tim be surprised
+Tim play
+Tim be happy
+Dog be easy
+Tim go at end with friend
+
+===AFTER===
+Once upon a time, there was a tiger named Tiger. Tiger was mean. Tim played. Tim had lot. Tiger started shake. There was also a character named Tim. Tim was scared. Tiger turned Dog. Tim was surprised. Tim played. Tim was happy. There was also a dog named Dog. Dog was easy. Tim went to at end with friend.
+
+===BEFORE===
+One day, a boy named Tim went to the park to play. He saw his friend, Sam, playing with a toy car. Tim wanted to join and play with Sam. They both played with the toy car, and it went fast. The car had a battery inside that made it go.
+Tim said, "Sam, the battery is tight in the car. It will not fall out." Sam smiled and they kept playing. They raced the car around the park, laughing and having fun.
+But then, something unexpected happened. A big dog came and took the toy car in its mouth! Tim and Sam were scared, but the dog just wanted to play too. They all played together, and the dog was very gentle with the car. In the end, Tim, Sam, and the dog became good friends.
+
+===EVENTS===
+@Tim:person(character) @Sam:person(character) @Park:place(park) @Toy:object(toy) @Car:object(car) @Dog:animal(dog)
+Tim want join
+Tim play Sam
+Tim play Car
+Tim go
+Car have battery
+Car go
+Tim say
+Tim fall
+Sam smile
+Sam keep play
+Sam race Car Park
+Sam have fun
+Dog come
+Dog take Car in mouth
+Tim be scared
+Dog want play
+Dog play
+Tim become in end friend
+
+===AFTER===
+Tim wanted join. Tim played Sam. Tim played Car. Tim went to. Car had battery. Car went to. Tim said, "." Tim fell. Sam smiled. Sam kept play. Sam race Car Park. Sam had fun. Dog came. Dog took Car in mouth. Once upon a time, there was a character named Tim. Tim was scared. Dog wanted play. Dog played. Tim became in end friend.
+
+===BEFORE===
+Once upon a time, there was a sailor named Tom. Tom had a big boat. He liked to sail on the sea. One day, Tom saw a little fish. The fish was sad. It was lost and wanted to go home.
+Tom said, "I can help you, little fish. You can fit in my boat, and I will take you home." The little fish was happy. It jumped into Tom's boat. They sailed together on the sea.
+The sea was safe and calm. Tom and the little fish talked and laughed. They became good friends. At last, they found the fish's home. The little fish said, "Thank you, Tom, for helping me." Tom smiled and waved goodbye. He sailed away, knowing he had a new friend.
+
+===EVENTS===
+@Tom:person(sailor) @Fish:animal(fish)
+Tom have boat
+Tom see Fish
+Fish be sad
+Fish lose
+Fish want go
+Tom say
+Tom take you
+Fish be happy
+Fish jump into boat
+Fish sail on sea
+Tom talk
+Tom laugh
+Tom become friend
+Tom find home
+Fish say thank you
+Tom smile
+Tom wave goodbye
+
+===AFTER===
+Tom had boat. Tom saw Fish. Once upon a time, there was a fish named Fish. Fish was sad. Fish lost. Fish wanted go. Tom said, "." Tom took you. Fish was happy. Fish jumped into boat. Fish sail on sea. Tom talk. Tom laughed. Tom became friend. Tom found home. Fish said, "thank you." Tom smiled. Tom wave goodbye.
+
+===BEFORE===
+Once upon a time, there was a smooth vase. It was very pretty. The vase lived in a small house with a girl named Lily and her mom.
+One day, Lily and her mom went outside to play. Before they left, her mom said, "Lily, please close the door." Lily closed the door and they played all day.
+When they came back, they saw the smooth vase on the floor. It was broken! Lily and her mom were very sad. They could not fix the pretty vase. The end.
+
+===EVENTS===
+@Lily:person(character) @Vase:object(vase) @Door:object(door)
+Door be pretty
+Vase live in house with girl
+Lily go
+Lily leave
+Lily close Door
+Lily play
+Lily come
+Lily see Vase
+Lily break
+Lily fix Vase
+
+===AFTER===
+Once upon a time, there was a door named Door. Door was pretty. Vase lived in house with girl. Lily went to. Lily left. Lily closed Door. Lily played. Lily came. Lily saw Vase. Lily broke. Lily fixed Vase.
+
+===BEFORE===
+Once upon a time there was a person named Sue. She weighed a lot and her momma said that she had to start eating less and exercising more. So, Sue decided to start walking around the block every day.
+The first day Sue felt like it was too hard. But after a few days, Sue found it was easy! She started to feel lighter and lighter everyday.
+Soon Sue wanted to do something more fun for exercise. Sue's momma suggested that she try dancing to her favorite songs on the television. Sue thought this was a great idea.
+So, Sue watched the television, picked out her favorite songs and started to dance. It was hard at first but because it was fun, she soon found it was easy. And soon, Sue was weighing barely anything at all!
+
+===EVENTS===
+@Sue:person(person)
+Sue say
+Sue exercise more
+Sue decide start
+Sue feel
+Sue find after day
+Sue want do something fun for exercise
+Sue think
+Sue watch television
+Sue pick song
+Sue start dance
+Sue be hard
+Sue find
+Sue weigh anything
+
+===AFTER===
+Sue said, "." Sue exercise more. Sue decided start. Sue felt. Sue found after day. Sue wanted do something fun for exercise. Sue thought. Sue watch television. Sue picked song. Sue started dance. Once upon a time, there was a person named Sue. Sue was hard. Sue found. Sue weigh anything.
+
+===BEFORE===
+One day, a little boy named Tim went to the park with his mom. Tim loved to play on the swings and slide. His mom was always dependable and watched him closely. They had a lot of fun together.
+Soon, Tim told his mom, "I need to use the toilet." His mom said, "Okay, let's go find one." They found a toilet near the park. But the toilet was old and not very clean. Tim's mom didn't like it, but Tim really needed to go.
+Tim went inside the toilet and tried to use it. But, suddenly, the toilet broke and water came out. Tim got very wet and dirty. He cried and said, "Mom, I don't like this toilet!" His mom hugged him and said, "I know, Tim. We will find a better one next time." They went home with Tim still feeling sad and wet.
+
+===EVENTS===
+@Tim:person(character) @Park:place(park)
+Park watch he
+Park have lot
+Tim tell mom
+Tim find toilet Park
+Tim need go
+Tim try use Tim
+Tim come
+Tim get wet
+Tim say
+Tim say
+Tim go
+
+===AFTER===
+Park watch he. Park had lot. Tim told mom. Tim found toilet Park. Tim needed go. Tim tried use Tim. Tim came. Tim got wet. Tim said, "." Tim said, "." Tim went to.
+
+===BEFORE===
+Once upon a time, there was a hunter. He lived in a small house near the woods. He had a dog named Spot. Spot was a fierce dog. They were best friends.
+One day, the hunter and Spot went into the woods to find food. They saw a big bird in a tree. The hunter got ready to shoot. Spot barked loudly. The bird flew away. They did not catch the bird, but they were not sad.
+The hunter and Spot played in the woods. They ran and jumped. They had lots of fun. Then, they went back to their small house. They were happy to be together. And they lived happily ever after.
+
+===EVENTS===
+@Spot:animal(fierce,dog) @Hunter:person(hunter) @Bird:animal(bird)
+Spot be Spot
+Spot be friend
+Hunter go into wood
+Hunter see Bird in tree
+Hunter get ready
+Spot bark
+Bird fly
+Bird catch Bird
+Hunter play in wood
+Hunter run
+Hunter jump
+Hunter have lot
+Hunter go
+Hunter be happy
+Hunter live
+
+===AFTER===
+Once upon a time, there was a fierce dog named Spot. Spot was Spot. Spot was friend. Hunter went to into wood. Hunter saw Bird in tree. Hunter got ready. Spot barked. Bird flew. Bird caught Bird. Hunter played in wood. Hunter ran. Hunter jumped. Hunter had lot. Hunter went to. There was also a hunter named Hunter. Hunter was happy. Hunter lived.
+
+===BEFORE===
+Once, there was a young boy named Tim. Tim had a toy spear. He liked to play with his spear all day. One day, Tim went to the park to play with his friends.
+At the park, Tim saw a big tree. Tim dared his friend, Sam, to climb the tree. Sam said, "I dare you to climb the tree first!" So, Tim started to climb the tree with his spear.
+When Tim got to the top of the tree, he saw a big bird. The bird looked at Tim and said, "Hello! I am a talking bird!" Tim was very surprised. He did not know birds could talk. The bird became Tim's new friend, and they played together in the park all day.
+
+===EVENTS===
+@Tim:person(young,boy) @Park:place(park) @Tree:object(tree) @Bird:animal(bird)
+Tim have spear
+Tim like play with spear
+Tim go Park
+Tim see Park Tree
+Tim dare friend climb Tree
+Tim start climb Tree with spear
+Tim get to top
+Tim see Bird
+Bird look Tim
+Bird say
+Tim be surprised
+Tim know
+Bird talk
+Bird become friend
+Bird play Park
+
+===AFTER===
+Tim had spear. Tim liked play with spear. Tim went to Park. Tim saw Park Tree. Tim dare friend climb Tree. Tim started climb Tree with spear. Tim got to top. Tim saw Bird. Bird looked at Tim. Bird said, "." Once upon a time, there was a young boy named Tim. Tim was surprised. Tim knew. Bird talk. Bird became friend. Bird played Park.
+
+===BEFORE===
+One day, a girl named Lily found a broken toy car. She wanted to repair it and make it pretty. So, she went to her dad for help. 
+"Daddy, can you help me fix this car and make it pretty?" Lily asked. Her dad said, "Of course, let's use some paint to make it pretty too!" They both worked together to repair the toy car.
+After they fixed the car, they decided to paint it. They painted it with many colors. When they were done, the car looked very pretty. But then, something unexpected happened. The car started to move on its own! Lily and her dad were very surprised. They had so much fun playing with the magical toy car.
+
+===EVENTS===
+@Lily:person(character) @Toy:object(toy) @Car:object(car)
+Car make
+Car make
+Lily ask
+Lily work
+Lily fix Car
+Lily decide paint Lily
+Lily paint Lily with color
+Lily do
+Car look pretty
+Car start move on own
+Lily be surprised
+Lily have playing
+
+===AFTER===
+Car made. Car made. Lily asked. Lily work. Lily fixed Car. Lily decided paint Lily. Lily paint Lily with color. Lily do. Car looked at pretty. Car started move on own. Once upon a time, there was a character named Lily. Lily was surprised. Lily had playing.
+
+===BEFORE===
+Once upon a time there was a little girl named Kate. She had a wonderful garden in her backyard. She loved to play in it.
+One day, something strange happened in the garden. All the flowers in the garden were starting to turn brown, and it made Kate very worried. 
+Kate went to her mom and said, "Mom, my garden looks terrible! What should I do?"
+Her mom said, "Don't worry, honey. We'll figure it out together."
+They went to the garden and worked to fix it. They watered the flowers and got rid of the bugs. Soon, the garden was beautiful again.
+Kate was very happy and she smiled. She thanked her mom for helping her. She knew she would always have someone to rely on when she was worried.
+
+===EVENTS===
+@Kate:person(little,girl) @Garden:place(garden)
+Kate have Garden in backyard
+Kate love play Garden
+Garden make
+Kate go to mom
+Kate say
+Garden look terrible
+Kate go Garden
+Kate work
+Kate water flower
+Kate rid of bug
+Garden be beautiful
+Kate be happy
+Kate smile
+Kate thank mom
+Kate know
+Kate have someone
+
+===AFTER===
+Kate had Garden in backyard. Kate loved play Garden. Garden made. Kate went to to mom. Kate said, "." Garden looked at terrible. Kate went to Garden. Kate work. Kate water flower. Kate rid of bug. Once upon a time, there was a garden named Garden. Garden was beautiful. There was also a little girl named Kate. Kate was happy. Kate smiled. Kate thanked mom. Kate knew. Kate had someone.
+
+===BEFORE===
+One day, a little girl named Amy was eager to wear her new dress. It was a pretty dress with lots of colors. She wanted to show it to her friend, Ben.
+Amy went to Ben's house and said, "Look at my new dress, Ben! Isn't it pretty?" Ben looked at the dress and said, "Yes, it is very pretty, Amy. I like the colors."
+They played outside all day, running and jumping. But then, Amy fell down and got her dress dirty. She started to cry. Ben said, "I am sorry, Amy. I did not want you to get your dress dirty."
+Amy felt regret for playing so hard in her new dress. She said, "It's okay, Ben. Next time, I will be more careful when I wear my new dress."
+From that day on, Amy learned to be more careful when wearing her pretty dresses. And she and Ben continued to play and have fun together.
+
+===EVENTS===
+@Amy:person(character) @Ben:person(character) @Dress:object(dress)
+Dress be Dress
+Amy go to house
+Amy say
+Ben look Dress
+Ben say
+Ben play
+Ben jump
+Amy fall
+Amy get
+Ben say
+Amy feel regret
+Amy learn from day be
+Amy have fun
+
+===AFTER===
+Once upon a time, there was a dress named Dress. Dress was Dress. Amy went to to house. Amy said, "." Ben looked at Dress. Ben said, "." Ben played. Ben jumped. Amy fell. Amy got. Ben said, "." Amy felt regret. Amy learned from day be. Amy had fun.
+
+===BEFORE===
+Once upon a time, there was a nice girl named Lily. She loved to play with her friends outside. They liked to run, jump, and laugh in the fresh air. The air was full of oxygen, which helped them breathe and have fun.
+One day, Lily and her friends found a big log. They thought it would be fun to walk on it. They took turns trying to balance on the log. Some of them wobbled and almost fell, but they all tried their best.
+In the end, Lily was the best at balancing on the log. Her friends clapped and cheered for her. They all had a nice day playing outside, breathing the oxygen, and learning to balance. And they all lived happily ever after.
+
+===EVENTS===
+@Lily:person(nice,girl)
+Lily love play with friend
+Lily like run
+Lily laugh in air
+Lily breathe
+Lily have fun
+Lily find log
+Lily think
+Lily take turn
+Lily fall
+Lily try good
+Lily be in end good
+Lily cheer Lily
+Lily have day
+Lily learn balance
+Lily live
+
+===AFTER===
+Lily loved play with friend. Lily liked run. Lily laughed. Lily breathe. Lily had fun. Lily found log. Lily thought. Lily took turn. Lily fell. Lily tried good. Once upon a time, there was a nice girl named Lily. Lily was in end good. Lily cheer Lily. Lily had day. Lily learned balance. Lily lived.
+
+===BEFORE===
+Once upon a time there was a boy named Thomas. He was a brave three-year-old who loved to play football.
+Every Saturday, he went to his local park to play with his friends. Today, something different happened.
+When they walked into the park, they heard a loud noise. Suddenly, a fierce lion entered the park! Everyone was scared, but Thomas stood still. He saw his football lying on the ground and he got an idea.
+He bravely stepped forward and threw the football at the fierce lion. The lion was so surprised it ran away! Everyone celebrated and Thomas became a hero!
+
+===EVENTS===
+@Thomas:person(boy) @Park:place(park) @Lion:animal(lion)
+Thomas be old
+Thomas go Park
+Thomas walk Park
+Thomas hear noise
+Lion enter Park
+Thomas stand
+Thomas see
+Thomas get idea
+Thomas step
+Thomas throw football Lion
+Lion be surprised
+Lion run
+Thomas become hero
+
+===AFTER===
+Once upon a time, there was a boy named Thomas. Thomas was old. Thomas went to Park. Thomas walked Park. Thomas hear noise. Lion enter Park. Thomas stood up. Thomas saw. Thomas got idea. Thomas step. Thomas threw football Lion. There was also a lion named Lion. Lion was surprised. Lion ran. Thomas became hero.
+
+===BEFORE===
+Once upon a time, there was a loyal dog named Spot. Spot loved his family very much. He was with them for many years. Spot liked to play with the kids, and they loved him too.
+One day, Spot saw a new cat in the yard. The cat was black and white. "Who are you?" Spot questioned the cat. The cat said, "I am Whiskers, and I want to be friends." Spot was happy to have a new friend. They played together all day.
+But then, something unexpected happened. Whiskers found a big hole in the yard. Spot and Whiskers went in the hole. They found a secret world with lots of toys and treats! They played and ate until they were tired. At the end of the day, they went back home. Spot and Whiskers were friends for many more years, and they always had fun in their secret world.
+
+===EVENTS===
+@Spot:animal(dog) @Whiskers:person(character) @Yard:place(yard) @Cat:animal(cat)
+Spot love family
+Spot like play with kid
+Spot love he
+Spot see Cat
+Cat be black
+Spot question Cat
+Cat say
+Cat want be
+Spot be happy
+Spot play
+Whiskers find hole
+Spot go in hole
+Spot find world with lot
+Spot play
+Spot eat
+Spot go at end
+Spot be friend
+Spot have fun in world
+
+===AFTER===
+Spot loved family. Spot liked play with kid. Spot loved he. Spot saw Cat. Once upon a time, there was a cat named Cat. Cat was black. Spot question Cat. Cat said, "." Cat wanted be. There was also a dog named Spot. Spot was happy. Spot played. Whiskers found hole. Spot went to in hole. Spot found world with lot. Spot played. Spot ate. Spot went to at end. Spot was friend. Spot had fun in world.
+
+===BEFORE===
+Once upon a time there was a puppy. He was small and cute with white fur. He had a white collar around his neck. The puppy was so excited because he was going to adventures with his girl.
+The girl asked the puppy, "What will we include on our adventure today?!"
+The puppy wagged his tail and replied, "Let's go swimming and running in the park!"
+So they both went to the park. They played tag and took a swim in the lake. The puppy was having so much fun! He chased the birds and ducks around the park.
+Then the girl noticed that it was getting late, so they both headed home. The puppy was so tired but he was happy with all the fun they included on their adventure!
+
+===EVENTS===
+@Puppy:animal(puppy) @Girl:person(girl) @Park:place(park) @Lake:place(lake)
+Puppy be excited
+Girl ask Puppy
+Puppy wag tail
+Puppy reply let
+Puppy run Park
+Girl go Park
+Girl play tag
+Girl take swim Lake
+Puppy have fun
+Girl notice
+Puppy get late
+Puppy head
+Puppy be tired
+
+===AFTER===
+Once upon a time, there was a puppy named Puppy. Puppy was excited. Girl asked Puppy. Puppy wag tail. Puppy reply let. Puppy ran Park. Girl went to Park. Girl played tag. Girl took swim Lake. Puppy had fun. Girl notice. Puppy got late. Puppy head. Puppy was tired.
+
+===BEFORE===
+Once upon a time, there was a big slide in a park. Every day, many kids would come and play on the slide. They would laugh and have so much fun.
+One day, an elderly man came to the park. He saw the kids playing on the slide and wanted to try it too. He felt happy and young again. So, he decided to go on the slide.
+When he went down the slide, all the kids clapped and cheered for him. They were so happy to see the elderly man having fun. After that, they all had a meeting under a tree. They talked and laughed together. The elderly man told them stories from when he was a kid. They all had a great time and became good friends.
+
+===EVENTS===
+@Slide:object(slide) @Park:place(park)
+Park play Slide
+Park laugh
+Park have fun
+Park want try Park
+Park cheer for he
+Park be happy
+Park have after that meeting
+Park talk
+Park laugh
+Park have time
+Park become friend
+
+===AFTER===
+Park played Slide. Park laughed. Park had fun. Park wanted try Park. Park cheer for he. Once upon a time, there was a park named Park. Park was happy. Park had after that meeting. Park talk. Park laughed. Park had time. Park became friend.
+
+===BEFORE===
+Once upon a time, there was a little rabbit named Remy. Remy lived near a hedge. One day, Remy felt very cold. He wanted to find a warm place to stay.
+Remy hopped to his friend, Teddy the turtle. "Teddy, I feel cold. Can you help me find a warm place?" asked Remy. Teddy nodded and said, "I remember a warm place. Follow me, Remy!"
+Teddy led Remy to a sunny spot near the hedge. Remy felt warm and happy. They played together all day. From that day on, Remy and Teddy always remembered the warm spot near the hedge.
+
+===EVENTS===
+@Remy:animal(little,rabbit) @Teddy:person(character) @Turtle:animal(turtle)
+Remy live near hedge
+Remy feel cold
+Remy hop to friend
+Teddy nod
+Teddy say
+Teddy lead Remy to spot
+Remy feel warm
+Remy play
+Remy remember from day spot
+
+===AFTER===
+Remy lived near hedge. Remy felt cold. Remy hop to friend. Teddy nod. Teddy said, "." Teddy led Remy to spot. Remy felt warm. Remy played. Remy remembered from day spot.
+
+===BEFORE===
+One day, a little girl named True went to the park. She loved to play on the swings. True saw a boy who was sad. He wanted to swing too, but he was too small to push himself. True had an idea.
+True said, "I can help you swing. I will push you." The boy smiled and said, "Thank you, True." So, True helped the boy onto the swing and began to push him. The boy was very happy as he swung back and forth.
+As they played, the boy's mom came over. She saw True helping her son and was grateful. She said, "Thank you, True, for helping my little boy." True smiled and said, "You're welcome. I like to help my friends." They all played together and had a fun day at the park.
+
+===EVENTS===
+@True:person(character) @Thank:person(character) @Park:place(park) @Boy:person(boy) @Swing:object(swing)
+True see Boy
+Boy want swing
+True have idea
+True say
+Boy smile
+Boy say thank you
+True help Boy Swing
+True begin push Boy
+Boy be happy
+Boy swing
+Boy play
+Boy say
+Boy play
+Boy have day Park
+
+===AFTER===
+True saw Boy. Boy wanted swing. True had idea. True said, "." Boy smiled. Boy said, "thank you." True helped Boy Swing. True begin push Boy. Once upon a time, there was a boy named Boy. Boy was happy. Boy swing. Boy played. Boy said, "." Boy played. Boy had day Park.

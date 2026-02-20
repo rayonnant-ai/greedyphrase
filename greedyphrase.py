@@ -144,6 +144,195 @@ def count_token_bigrams(tokens_path, min_freq=100):
     return result
 
 
+def count_token_ngrams(tokens_path, max_n=7, min_freq=100):
+    """Count token n-grams for n=2..max_n from a .tokens file using numpy.
+
+    n=2..4: pack n uint16 IDs into one uint64 via bit-shifting, use np.unique.
+    n=5..7: pack into structured dtype (hi: uint64, lo: uint64), use np.unique.
+    Returns dict[tuple[int,...], int] filtered by min_freq.
+    """
+    tokens = np.fromfile(tokens_path, dtype=np.uint16)
+    result = {}
+    N = len(tokens)
+
+    for n in range(2, max_n + 1):
+        if N < n:
+            continue
+
+        if n <= 4:
+            # Pack n token IDs into a single uint64
+            packed = np.zeros(N - n + 1, dtype=np.uint64)
+            for i in range(n):
+                packed |= tokens[i:N - n + 1 + i].astype(np.uint64) << np.uint64((n - 1 - i) * 16)
+            unique_packed, counts = np.unique(packed, return_counts=True)
+            mask = counts >= min_freq
+            for p, c in zip(unique_packed[mask], counts[mask]):
+                ids = tuple(int((p >> np.uint64((n - 1 - i) * 16)) & np.uint64(0xFFFF)) for i in range(n))
+                result[ids] = int(c)
+        else:
+            # n=5..7: pack into (hi: uint64, lo: uint64)
+            # hi = first 4 tokens, lo = remaining tokens
+            hi = np.zeros(N - n + 1, dtype=np.uint64)
+            for i in range(4):
+                hi |= tokens[i:N - n + 1 + i].astype(np.uint64) << np.uint64((3 - i) * 16)
+            lo = np.zeros(N - n + 1, dtype=np.uint64)
+            rem = n - 4
+            for i in range(rem):
+                lo |= tokens[4 + i:N - n + 1 + 4 + i].astype(np.uint64) << np.uint64((rem - 1 - i) * 16)
+
+            dt = np.dtype([('hi', np.uint64), ('lo', np.uint64)])
+            packed = np.empty(N - n + 1, dtype=dt)
+            packed['hi'] = hi
+            packed['lo'] = lo
+            unique_packed, counts = np.unique(packed, return_counts=True)
+            mask = counts >= min_freq
+            for p, c in zip(unique_packed[mask], counts[mask]):
+                h, l = int(p['hi']), int(p['lo'])
+                ids = tuple(int((h >> ((3 - i) * 16)) & 0xFFFF) for i in range(4))
+                ids += tuple(int((l >> ((rem - 1 - i) * 16)) & 0xFFFF) for i in range(rem))
+                result[ids] = int(c)
+
+    return result
+
+
+# ─── Word-level n-gram counting (for hollow mining on fast_mask output) ───
+
+_MASK_SENTINEL = np.uint32(0xFFFFFFFF)
+_MASK_LINE_SEP = np.uint32(0xFFFFFFFE)
+
+
+def count_word_ngrams(word_ids, max_n=7, min_freq=100):
+    """Count n-grams in a uint32 word-ID stream from fast_mask.
+
+    Skips n-grams containing SENTINEL (0xFFFFFFFF) or LINE_SEP (0xFFFFFFFE).
+    Returns dict[tuple[int,...], int] filtered by min_freq.
+    """
+    N = len(word_ids)
+    result = {}
+    bad = word_ids >= _MASK_LINE_SEP  # both SENTINEL and LINE_SEP
+
+    for n in range(2, max_n + 1):
+        if N < n:
+            continue
+        M = N - n + 1
+
+        # Valid positions: no bad ID in the window
+        valid = np.ones(M, dtype=bool)
+        for j in range(n):
+            valid &= ~bad[j:j + M]
+
+        nvalid = valid.sum()
+        if nvalid == 0:
+            continue
+
+        # Pack into structured dtype
+        valid_idx = np.where(valid)[0]
+        dt = np.dtype([(f'w{j}', np.uint32) for j in range(n)])
+        packed = np.empty(nvalid, dtype=dt)
+        for j in range(n):
+            packed[f'w{j}'] = word_ids[valid_idx + j]
+
+        unique, counts = np.unique(packed, return_counts=True)
+        mask = counts >= min_freq
+        for p, c in zip(unique[mask], counts[mask]):
+            ids = tuple(int(p[f'w{j}']) for j in range(n))
+            result[ids] = int(c)
+
+    return result
+
+
+def replace_word_ngrams(stream, ngrams, start_id):
+    """Replace matched n-grams in a uint32 stream with compound IDs.
+
+    Numpy-vectorized, greedy longest-first left-to-right.
+    Uses polynomial hashing for fast candidate detection, then greedy assignment.
+    Returns (new_stream_array, compound_map: {id: ngram_tuple}).
+    """
+    N = len(stream)
+    compound_map = {}
+    HASH_PRIME = np.uint64(2654435761)
+
+    # Group by length, assign CIDs
+    by_length = collections.defaultdict(list)
+    for i, ngram in enumerate(ngrams):
+        cid = start_id + i
+        by_length[len(ngram)].append((ngram, cid))
+        compound_map[cid] = ngram
+
+    # Track replacements
+    is_start = np.zeros(N, dtype=bool)
+    cid_at = np.zeros(N, dtype=np.uint32)
+    len_at = np.zeros(N, dtype=np.int32)
+    consumed = np.zeros(N, dtype=bool)
+
+    # Process longest first (greedy)
+    for L in sorted(by_length.keys(), reverse=True):
+        targets = by_length[L]
+        M = N - L + 1
+        if M <= 0:
+            continue
+
+        # Compute polynomial hash for each window (vectorized numpy)
+        window_hash = np.zeros(M, dtype=np.uint64)
+        for j in range(L):
+            window_hash = window_hash * HASH_PRIME + stream[j:j + M].astype(np.uint64)
+
+        # Hash targets + build lookup
+        target_hash_to_cid = {}
+        target_hash_list = []
+        for ngram, cid in targets:
+            h = np.uint64(0)
+            for v in ngram:
+                h = h * HASH_PRIME + np.uint64(v)
+            target_hash_to_cid[int(h)] = cid
+            target_hash_list.append(int(h))
+
+        target_hash_arr = np.unique(np.array(target_hash_list, dtype=np.uint64))
+        if len(target_hash_arr) == 0:
+            continue
+
+        # Find candidate positions: hash match AND not consumed
+        candidate_mask = np.isin(window_hash, target_hash_arr)
+        for j in range(L):
+            candidate_mask &= ~consumed[j:j + M]
+
+        candidate_positions = np.where(candidate_mask)[0]
+        if len(candidate_positions) == 0:
+            continue
+
+        # Pre-extract hashes as Python list for fast iteration
+        candidate_hashes = window_hash[candidate_positions].tolist()
+        candidate_positions = candidate_positions.tolist()
+
+        # Greedy left-to-right assignment
+        next_free = 0
+        for pos, h in zip(candidate_positions, candidate_hashes):
+            if pos < next_free:
+                continue
+            cid = target_hash_to_cid.get(h)
+            if cid is not None:
+                is_start[pos] = True
+                cid_at[pos] = cid
+                len_at[pos] = L
+                consumed[pos:pos + L] = True
+                next_free = pos + L
+
+    # Build output: replace match starts with CID, skip consumed tails
+    sel = np.where(is_start)[0]
+    is_skip = np.zeros(N, dtype=bool)
+    if len(sel) > 0:
+        sel_lens = len_at[sel]
+        skip_counts = sel_lens - 1
+        total_skip = int(skip_counts.sum())
+        if total_skip > 0:
+            offsets = np.concatenate([np.arange(1, L) for L in sel_lens])
+            bases = np.repeat(sel, skip_counts)
+            is_skip[bases + offsets] = True
+
+    output = np.where(is_start, cid_at, stream)
+    output = output[~is_skip]
+
+    return output, compound_map
 
 
 class GreedyPhraseTokenizer:
@@ -157,13 +346,19 @@ class GreedyPhraseTokenizer:
     - Deterministic, greedy matching (longest match first).
     - Outputs uint16 tokens.
     """
-    def __init__(self, vocab_size=65536, model_path="tokenizer/greedyphrase.vocab"):
+    def __init__(self, vocab_size=65536, model_path="tokenizer/greedyphrase.vocab",
+                 event_model=False):
         self.vocab_size = vocab_size
         self.model_path = model_path
         self.vocab: List[bytes] = []
         self.token_to_id: Dict[bytes, int] = {}
         self.trie = {} # Character-based trie for fast greedy matching
         self.templates: Dict[int, TemplateInfo] = {}  # vocab_id -> TemplateInfo
+        self.event_model = event_model
+        self._event_parser = None
+        if event_model:
+            from event_parser import EventParser
+            self._event_parser = EventParser()
 
         if os.path.exists(model_path):
             self.load(model_path)
@@ -272,13 +467,136 @@ class GreedyPhraseTokenizer:
         
         return winners
 
-    def train(self, file_paths: List[str], max_vocab_size=65536, 
-              compound_passes=2, bpe_slots=3000, template_budget=2000):
+    def _mine_hollow_compounds(self, text_path, max_n=7, min_freq=100):
+        """Iterative hollow compound mining using fast_mask.
+
+        Pass 1: fast_mask → count word n-grams in the uint32 stream.
+        Pass 2+: replace discovered n-grams with compound IDs, mask all
+                 remaining original word IDs → count again.
+        Until convergence (<1% stream shrink) or 20 passes.
+
+        Returns list of (freq, compound_bytes) for the candidate pool.
+        """
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        mask_bin = self._ensure_c_binary("fast_mask")
+        data_dir = os.path.join(base_dir, "data")
+        os.makedirs(data_dir, exist_ok=True)
+        words_path = os.path.join(data_dir, "mask_words.bin")
+        vocab_path = os.path.join(data_dir, "mask_vocab.bin")
+
+        print("  Running fast_mask...", flush=True)
+        subprocess.run([mask_bin, text_path, words_path, vocab_path], check=True)
+
+        # Load word vocab
+        word_vocab = []
+        with open(vocab_path, 'rb') as f:
+            n_words = struct.unpack('<I', f.read(4))[0]
+            for _ in range(n_words):
+                wlen = struct.unpack('<I', f.read(4))[0]
+                word_vocab.append(f.read(wlen))
+
+        stream = np.fromfile(words_path, dtype=np.uint32)
+        n_word_ids = len(word_vocab)  # original word IDs are 0..n_word_ids-1
+
+        all_compound_map = {}  # compound_id -> word_id tuple
+        next_cid = n_word_ids
+        prev_len = len(stream)
+
+        for pass_num in range(1, 21):
+            print(f"  Hollow pass {pass_num}: stream {len(stream):,} tokens", flush=True)
+
+            ngram_counts = count_word_ngrams(stream, max_n=max_n, min_freq=min_freq)
+            if not ngram_counts:
+                print(f"  No frequent n-grams found, stopping.", flush=True)
+                break
+
+            # Sort by (-freq, -len) — prefer longer at same frequency
+            sorted_ngrams = sorted(ngram_counts.items(), key=lambda x: (-x[1], -len(x[0])))
+
+            # Take top 10K that aren't already discovered
+            known = set(all_compound_map.values())
+            new_ngrams = []
+            for ngram, freq in sorted_ngrams:
+                if ngram in known:
+                    continue
+                new_ngrams.append(ngram)
+                if len(new_ngrams) >= 10000:
+                    break
+
+            if not new_ngrams:
+                print(f"  No new n-grams, stopping.", flush=True)
+                break
+
+            print(f"  Replacing {len(new_ngrams)} n-grams...", flush=True)
+            stream, new_map = replace_word_ngrams(stream, new_ngrams, next_cid)
+            all_compound_map.update(new_map)
+            next_cid += len(new_ngrams)
+
+            # Mask: replace all original word IDs (not compounds, not special) with SENTINEL
+            is_original = stream < n_word_ids
+            stream[is_original] = _MASK_SENTINEL
+
+            new_len = len(stream)
+            drop_pct = 100.0 * (prev_len - new_len) / prev_len if prev_len > 0 else 0
+            print(f"  Stream: {prev_len:,} -> {new_len:,} (shrink {drop_pct:.1f}%)", flush=True)
+            if drop_pct < 1.0 and pass_num > 1:
+                print(f"  Converged.", flush=True)
+                break
+            prev_len = new_len
+
+        # Resolve compound IDs back to byte strings
+        def resolve(wid):
+            if wid in all_compound_map:
+                parts = []
+                for sub in all_compound_map[wid]:
+                    parts.extend(resolve(sub))
+                return parts
+            elif wid < n_word_ids:
+                return [word_vocab[wid]]
+            else:
+                return []  # SENTINEL — shouldn't appear in compounds
+
+        # Count all IDs in one pass (O(N log N) instead of O(K * N))
+        unique_ids, unique_counts = np.unique(stream, return_counts=True)
+        freq_map = dict(zip(unique_ids.astype(int), unique_counts.astype(int)))
+
+        results = []
+        for cid in all_compound_map:
+            word_parts = resolve(cid)
+            if not word_parts:
+                continue
+            compound_bytes = b' '.join(word_parts)
+            freq = freq_map.get(cid, 0)
+            if freq > 0:
+                results.append((freq, compound_bytes))
+
+        print(f"  Hollow mining: {len(results)} compounds discovered", flush=True)
+        return results
+
+    def train(self, file_paths: List[str], max_vocab_size=65536,
+              compound_passes=2, compound_max_n=2, compound_converge=False,
+              hollow=False, bpe_slots=3000, template_budget=2000):
         """
         Trains the tokenizer vocabulary from a list of files using "Free Market" selection.
         """
         print(f"Training tokenizer on {len(file_paths)} files (Free Market Mode)...", flush=True)
         target_file = file_paths[0]
+
+        # Event model preprocessing: transform corpus before training
+        if self.event_model:
+            event_file = target_file + "_event.txt"
+            if not os.path.exists(event_file):
+                print(f"Transforming corpus to event model text...", flush=True)
+                text = open(target_file, 'r', encoding='utf-8', errors='replace').read()
+                event_text = self._event_parser.transform(text)
+                with open(event_file, 'w', encoding='utf-8') as f:
+                    f.write(event_text)
+                print(f"  Event text: {len(event_text):,} bytes "
+                      f"({len(event_text)/len(text)*100:.1f}% of original)", flush=True)
+            else:
+                print(f"Using cached event model text: {event_file}", flush=True)
+            target_file = event_file
+            file_paths = [event_file]
 
         # ── New Step 0: Mine Linguistic Templates ──
         winning_templates_data = []
@@ -360,23 +678,65 @@ class GreedyPhraseTokenizer:
 
         try:
             encoder_bin = self._ensure_fast_encoder()
-            for pass_num in range(1, compound_passes + 1):
-                print(f"Pass {pass_num}: encoding with {len(current_vocab)} tokens...", flush=True)
-                self._save_vocab(current_vocab, tmp_vocab_path)
-                subprocess.run([encoder_bin, tmp_vocab_path, target_file, tmp_tokens_path], check=True)
-                bigram_counts = count_token_bigrams(tmp_tokens_path, min_freq=max(50, 125 - pass_num * 25))
-                new_compounds = []
-                existing = set(current_vocab)
-                sorted_bigrams = sorted(bigram_counts.items(), key=lambda x: -x[1])
-                for (id_a, id_b), freq in sorted_bigrams:
-                    if id_a >= len(current_vocab) or id_b >= len(current_vocab): continue
-                    compound = current_vocab[id_a] + current_vocab[id_b]
-                    if len(compound) > 1 and compound not in existing:
-                        candidate_pool.append((freq, 0, compound))
-                        new_compounds.append(compound)
-                        existing.add(compound)
-                        if len(new_compounds) >= 10000: break
-                current_vocab.extend(new_compounds)
+
+            if hollow:
+                # ── Hollow mining: mask → count word n-grams → mask non-ngram → repeat ──
+                print("Hollow compound mining...", flush=True)
+                hollow_compounds = self._mine_hollow_compounds(
+                    target_file, max_n=compound_max_n, min_freq=100)
+                for freq, compound_bytes in hollow_compounds:
+                    candidate_pool.append((freq, 0, compound_bytes))
+                    current_vocab.append(compound_bytes)
+            else:
+                # ── Standard compound loop: encode → count token n-grams → repeat ──
+                max_passes = 20 if compound_converge else compound_passes
+                pass_num = 0
+                prev_token_count = None
+                while True:
+                    pass_num += 1
+                    if pass_num > max_passes:
+                        break
+                    print(f"Pass {pass_num}: encoding with {len(current_vocab)} tokens...", flush=True)
+                    self._save_vocab(current_vocab, tmp_vocab_path)
+                    subprocess.run([encoder_bin, tmp_vocab_path, target_file, tmp_tokens_path], check=True)
+
+                    token_count = os.path.getsize(tmp_tokens_path) // 2
+                    if compound_converge and prev_token_count is not None:
+                        drop_pct = 100.0 * (prev_token_count - token_count) / prev_token_count
+                        print(f"  Token count: {token_count:,} (drop {drop_pct:.2f}%)", flush=True)
+                        if drop_pct < 1.0:
+                            print(f"  Converged (<1% drop), stopping.", flush=True)
+                            break
+                    else:
+                        print(f"  Token count: {token_count:,}", flush=True)
+                    prev_token_count = token_count
+
+                    if compound_max_n > 2:
+                        ngram_counts = count_token_ngrams(tmp_tokens_path, max_n=compound_max_n,
+                                                          min_freq=max(50, 125 - pass_num * 25))
+                        sorted_ngrams = sorted(ngram_counts.items(), key=lambda x: (-x[1], -len(x[0])))
+                    else:
+                        bigram_counts = count_token_bigrams(tmp_tokens_path, min_freq=max(50, 125 - pass_num * 25))
+                        sorted_ngrams = sorted(bigram_counts.items(), key=lambda x: -x[1])
+
+                    new_compounds = []
+                    existing = set(current_vocab)
+                    for ids, freq in sorted_ngrams:
+                        if any(i >= len(current_vocab) for i in ids):
+                            continue
+                        compound = b"".join(current_vocab[i] for i in ids)
+                        if len(compound) > 1 and compound not in existing:
+                            candidate_pool.append((freq, 0, compound))
+                            new_compounds.append(compound)
+                            existing.add(compound)
+                            if len(new_compounds) >= 10000:
+                                break
+                    if not new_compounds:
+                        print(f"  No new compounds found, stopping.", flush=True)
+                        break
+                    current_vocab.extend(new_compounds)
+                    if not compound_converge and pass_num >= compound_passes:
+                        break
 
             # Step C: BPE
             print(f"Final encode for BPE...", flush=True)
@@ -416,27 +776,25 @@ class GreedyPhraseTokenizer:
         for freq, type, data in candidate_pool:
             if current_vocab_size >= max_vocab_size:
                 break
-                
+
             if type == 0: # Token
-                if data not in seen_tokens:
-                    winning_tokens.append(data)
-                    seen_tokens.add(data)
+                # Strip leading/trailing non-space whitespace (\n, \r, \t, etc.)
+                cleaned = data.strip(b'\t\n\x0b\x0c\r') if len(data) > 1 else data
+                if len(cleaned) > 1 and cleaned not in seen_tokens:
+                    winning_tokens.append(cleaned)
+                    seen_tokens.add(cleaned)
                     current_vocab_size += 1
             elif type == 1: # Template
                 winning_templates_data.append(data)
                 current_vocab_size += 1
-        
+
         # Add BPE tokens (ensuring they fit)
-        # In practice, BPE is small, but let's be robust
         for t in bpe_tokens:
-            if t not in seen_tokens:
+            cleaned = t.strip(b'\t\n\x0b\x0c\r') if len(t) > 1 else t
+            if len(cleaned) > 1 and cleaned not in seen_tokens:
                 if len(winning_tokens) + len(reserved_tokens) + len(reserved_bytes) + len(winning_templates_data) < max_vocab_size:
-                    winning_tokens.append(t)
-                    seen_tokens.add(t)
-                else:
-                    # If we are over, we have to drop something. 
-                    # Usually BPE is kept, so we might drop the last winners.
-                    pass
+                    winning_tokens.append(cleaned)
+                    seen_tokens.add(cleaned)
 
         self.vocab = reserved_tokens + reserved_bytes + winning_tokens
         self.token_to_id = {token: i for i, token in enumerate(self.vocab)}
@@ -598,6 +956,17 @@ class GreedyPhraseTokenizer:
         If templates are loaded, applies template matching as a post-pass.
         Optionally writes a uint8 meta array (0=normal, 1=template, 2=fill).
         """
+        # Event model preprocessing
+        if self.event_model:
+            event_file = input_path + "_event.txt"
+            if not os.path.exists(event_file):
+                print(f"Transforming input to event model text...", flush=True)
+                text = open(input_path, 'r', encoding='utf-8', errors='replace').read()
+                event_text = self._event_parser.transform(text)
+                with open(event_file, 'w', encoding='utf-8') as f:
+                    f.write(event_text)
+            input_path = event_file
+
         print(f"Encoding {input_path} to {output_path} using fast_encoder...", flush=True)
         encoder_bin = self._ensure_fast_encoder()
 
